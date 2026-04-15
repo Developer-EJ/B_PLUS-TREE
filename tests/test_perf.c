@@ -10,6 +10,10 @@
 
 #define BENCH_RUNS 3
 #define BENCH_LABEL_WIDTH 34
+#define BENCH_ID_RANGE_FROM 2500
+#define BENCH_ID_RANGE_TO 5000
+#define BENCH_ID_RANGE_LARGE_FROM 100000
+#define BENCH_ID_RANGE_LARGE_TO 500000
 
 /* ?? ??? ???? ?? ??? ??? ???? ????? ?? ?? ????. */
 static int utf8_display_width(const char *text) {
@@ -642,7 +646,6 @@ int main(int argc, char *argv[]) {
     const char *table = (argc > 1) ? argv[1] : "users";
     int rows = (argc > 2) ? atoi(argv[2]) : 1000000;
     const char *case_name = (argc > 3) ? argv[3] : "all";
-    int large_range_to = (rows > 0) ? rows : 1;
     BenchCase bench_case = BENCH_ALL;
     TableSchema *schema = NULL;
 
@@ -699,11 +702,12 @@ int main(int argc, char *argv[]) {
         ((bench_case == BENCH_ALL || bench_case == BENCH_ID_RANGE) &&
          bench_id_range_search(table, schema, 2,
                                "\uBC94\uC704 \uC870\uD68C(id)",
-                               rows / 4, rows / 2) != SQL_OK) ||
+                               BENCH_ID_RANGE_FROM, BENCH_ID_RANGE_TO) != SQL_OK) ||
         ((bench_case == BENCH_ALL || bench_case == BENCH_ID_RANGE_LARGE) &&
          bench_id_range_search(table, schema, 3,
                                "\uB300\uBC94\uC704 \uC870\uD68C(id)",
-                               1, large_range_to) != SQL_OK) ||
+                               BENCH_ID_RANGE_LARGE_FROM,
+                               BENCH_ID_RANGE_LARGE_TO) != SQL_OK) ||
         ((bench_case == BENCH_ALL || bench_case == BENCH_AGE_RANGE) &&
          bench_age_range_search(table, schema, 30, 40) != SQL_OK) ||
         ((bench_case == BENCH_ALL || bench_case == BENCH_HEIGHT) &&
