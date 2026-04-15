@@ -1,31 +1,30 @@
-﻿#include <stdio.h>
+/* =========================================================
+ * lexer.c — SQL 토크나이저
+ *
+ * 담당자 : 김규민 (역할 C)
+ * 금지   : 다른 팀원은 이 파일을 수정하지 않는다.
+ *
+ * 변경 이력:
+ *   - BETWEEN, AND 키워드 추가 (TOKEN_BETWEEN, TOKEN_AND)
+ * ========================================================= */
+
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
 #include "../../include/interface.h"
 
-/* =========================================================
- * lexer
- * TODO: 입력 문자열을 TokenList로 변환
- *
- * 구현 대상:
- *   1. 알파벳/키워드 처리
- *   2. 비교 연산자/기호 처리 (* , ( ) =)
- *   3. 문자열 리터럴 처리('...')
- *   4. 숫자 리터럴 처리
- *   5. 공백/주석 무시
- *   6. EOF 토큰 끝처리
- * ========================================================= */
-
-/* keyword table */
+/* ── 키워드 테이블 ──────────────────────────────────────── */
 static struct { const char *word; TokenType type; } keywords[] = {
-    {"SELECT", TOKEN_SELECT},
-    {"INSERT", TOKEN_INSERT},
-    {"INTO",   TOKEN_INTO},
-    {"FROM",   TOKEN_FROM},
-    {"WHERE",  TOKEN_WHERE},
-    {"VALUES", TOKEN_VALUES},
-    {NULL, TOKEN_EOF}
+    {"SELECT",  TOKEN_SELECT},
+    {"INSERT",  TOKEN_INSERT},
+    {"INTO",    TOKEN_INTO},
+    {"FROM",    TOKEN_FROM},
+    {"WHERE",   TOKEN_WHERE},
+    {"VALUES",  TOKEN_VALUES},
+    {"BETWEEN", TOKEN_BETWEEN},  /* 김규민 추가 */
+    {"AND",     TOKEN_AND},      /* 김규민 추가 — BETWEEN ~ AND ~ 에서 사용 */
+    {NULL,      TOKEN_EOF}
 };
 
 static TokenType keyword_lookup(const char *word) {
@@ -42,14 +41,16 @@ static TokenType keyword_lookup(const char *word) {
     return TOKEN_IDENT;
 }
 
-static int append_token(TokenList *list, TokenType type, const char *value, int line) {
+static int append_token(TokenList *list, TokenType type,
+                        const char *value, int line) {
     if (!list) return SQL_ERR;
 
     if (list->count == 0) {
-        list->tokens = calloc(8, sizeof(Token));
+        list->tokens = (Token *)calloc(8, sizeof(Token));
     } else if (list->count % 8 == 0) {
         size_t new_cap = (size_t)list->count * 2;
-        Token *next = realloc(list->tokens, new_cap * sizeof(Token));
+        Token *next = (Token *)realloc(list->tokens,
+                                        new_cap * sizeof(Token));
         if (!next) return SQL_ERR;
         list->tokens = next;
     }
@@ -71,21 +72,23 @@ static int append_token(TokenList *list, TokenType type, const char *value, int 
 TokenList *lexer_tokenize(const char *sql) {
     if (!sql) return NULL;
 
-    TokenList *list = malloc(sizeof(TokenList));
+    TokenList *list = (TokenList *)malloc(sizeof(TokenList));
     if (!list) return NULL;
     list->tokens = NULL;
-    list->count = 0;
+    list->count  = 0;
 
-    int line = 1;
-    const char *p = sql;
+    int         line = 1;
+    const char *p    = sql;
 
     while (*p) {
+        /* 공백 / 줄바꿈 건너뛰기 */
         while (isspace((unsigned char)*p)) {
             if (*p == '\n') line++;
             p++;
         }
         if (!*p) break;
 
+        /* 식별자 / 키워드 */
         if (isalpha((unsigned char)*p) || *p == '_') {
             const char *start = p;
             while (isalnum((unsigned char)*p) || *p == '_') p++;
@@ -97,10 +100,12 @@ TokenList *lexer_tokenize(const char *sql) {
             word[len] = '\0';
 
             TokenType type = keyword_lookup(word);
-            if (append_token(list, type, word, line) == SQL_ERR) goto fail;
+            if (append_token(list, type, word, line) == SQL_ERR)
+                goto fail;
             continue;
         }
 
+        /* 정수 리터럴 */
         if (isdigit((unsigned char)*p)) {
             const char *start = p;
             while (isdigit((unsigned char)*p)) p++;
@@ -111,64 +116,44 @@ TokenList *lexer_tokenize(const char *sql) {
             memcpy(num, start, len);
             num[len] = '\0';
 
-            if (append_token(list, TOKEN_INTEGER, num, line) == SQL_ERR) goto fail;
+            if (append_token(list, TOKEN_INTEGER, num, line) == SQL_ERR)
+                goto fail;
             continue;
         }
 
+        /* 문자열 리터럴 '...' */
         if (*p == '\'') {
             p++;
             const char *start = p;
-            while (*p && *p != '\'') {
-                p++;
-            }
+            while (*p && *p != '\'') p++;
             if (!*p) {
-                fprintf(stderr, "lexer: unterminated string literal at line %d\n", line);
+                fprintf(stderr,
+                        "lexer: unterminated string literal at line %d\n",
+                        line);
                 goto fail;
             }
-
             size_t len = (size_t)(p - start);
             char value[256];
             if (len >= sizeof(value)) len = sizeof(value) - 1;
             memcpy(value, start, len);
             value[len] = '\0';
 
-            if (append_token(list, TOKEN_STRING, value, line) == SQL_ERR) goto fail;
+            if (append_token(list, TOKEN_STRING, value, line) == SQL_ERR)
+                goto fail;
             p++;
             continue;
         }
 
-        if (*p == '*') {
-            if (append_token(list, TOKEN_STAR, "*", line) == SQL_ERR) goto fail;
-            p++;
-            continue;
-        }
-        if (*p == ',') {
-            if (append_token(list, TOKEN_COMMA, ",", line) == SQL_ERR) goto fail;
-            p++;
-            continue;
-        }
-        if (*p == '(') {
-            if (append_token(list, TOKEN_LPAREN, "(", line) == SQL_ERR) goto fail;
-            p++;
-            continue;
-        }
-        if (*p == ')') {
-            if (append_token(list, TOKEN_RPAREN, ")", line) == SQL_ERR) goto fail;
-            p++;
-            continue;
-        }
-        if (*p == '=') {
-            if (append_token(list, TOKEN_EQ, "=", line) == SQL_ERR) goto fail;
-            p++;
-            continue;
-        }
-        if (*p == ';') {
-            if (append_token(list, TOKEN_SEMICOLON, ";", line) == SQL_ERR) goto fail;
-            p++;
-            continue;
-        }
+        /* 단일 문자 기호 */
+        if (*p == '*') { if (append_token(list, TOKEN_STAR,      "*", line) == SQL_ERR) goto fail; p++; continue; }
+        if (*p == ',') { if (append_token(list, TOKEN_COMMA,     ",", line) == SQL_ERR) goto fail; p++; continue; }
+        if (*p == '(') { if (append_token(list, TOKEN_LPAREN,    "(", line) == SQL_ERR) goto fail; p++; continue; }
+        if (*p == ')') { if (append_token(list, TOKEN_RPAREN,    ")", line) == SQL_ERR) goto fail; p++; continue; }
+        if (*p == '=') { if (append_token(list, TOKEN_EQ,        "=", line) == SQL_ERR) goto fail; p++; continue; }
+        if (*p == ';') { if (append_token(list, TOKEN_SEMICOLON, ";", line) == SQL_ERR) goto fail; p++; continue; }
 
-        fprintf(stderr, "lexer: unknown character '%c' at line %d\n", *p, line);
+        fprintf(stderr,
+                "lexer: unknown character '%c' at line %d\n", *p, line);
         goto fail;
     }
 

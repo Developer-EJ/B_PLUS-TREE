@@ -1,0 +1,44 @@
+# ─────────────────────────────────────────────────────────
+# .gitattributes — 줄 바꿈 통일 설정
+#
+# 규칙:
+#   - 저장소 안에 저장되는 줄 바꿈은 항상 LF 로 통일한다.
+#   - Windows 에서 checkout 할 때는 CRLF 로 변환한다 (eol=crlf).
+#   - Linux / macOS 에서는 LF 그대로 사용한다.
+#
+# 적용 방법 (처음 한 번만 실행):
+#   git rm --cached -r .
+#   git add .
+#   git commit -m "normalize line endings"
+# ─────────────────────────────────────────────────────────
+
+# 모든 텍스트 파일: 저장소는 LF, checkout 은 OS 에 맞게 자동 변환
+* text=auto
+
+# C 소스 / 헤더 — 줄 바꿈을 LF 로 강제
+*.c   text eol=lf
+*.h   text eol=lf
+
+# Makefile — LF 필수 (탭 들여쓰기가 CRLF 에서 깨질 수 있음)
+Makefile text eol=lf
+
+# 설정 / 스크립트
+*.sh         text eol=lf
+*.sql        text eol=lf
+*.schema     text eol=lf
+*.md         text eol=lf
+*.gitignore  text eol=lf
+*.gitattributes text eol=lf
+*.json       text eol=lf
+Dockerfile   text eol=lf
+
+# 바이너리 파일 — 변환 없음
+*.dat    binary
+*.exe    binary
+*.o      binary
+*.a      binary
+*.lib    binary
+*.dll    binary
+*.png    binary
+*.jpg    binary
+*.pdf    binary
