@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# =============================================================
+# .githooks/pre-commit — 프리커밋 훅 (버전 관리됨)
+#
+# 설치:
+#   bash scripts/install_hooks.sh
+#
+# 실행되는 검증 (순서대로):
+#   1. 린터          — gcc 컴파일 에러 검증
+#   2. 소유권 가드    — 파일 소유권 규칙 검증
+#   3. binary 모드   — fopen text mode 검증
+#
+# 결과:
+#   모든 검증 통과 → 커밋 허용 (exit 0)
+#   하나라도 실패  → 커밋 차단 (exit 1) + logs/ 에 기록
+# =============================================================
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"
+if [ -z "$ROOT" ]; then
+    echo "[PRE-COMMIT] ERROR: git 저장소를 찾을 수 없습니다."
+    exit 1
+fi
+
+LOG_DIR="$ROOT/logs"
+LOG_FILE="$LOG_DIR/pre_commit_failures.log"
+TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+
+mkdir -p "$LOG_DIR"
+
+# ── 헤더 출력 ─────────────────────────────────────────────────
+echo "============================================================"
+echo "  PRE-COMMIT CHECKS  ($TIMESTAMP)"
+echo "============================================================"
+
+TOTAL_FAILED=0
+REPORT=""
+
+# ── 공통 함수: 검증 실행 + 로그 캡처 ──────────────────────────
+run_check() {
+    local label="$1"
+    local script="$2"
+    local output
+
+    echo ""
+    echo "[$label]"
+    output=$(bash "$ROOT/scripts/$script" 2>&1)
+    local exit_code=$?
+    echo "$output"
+
+    if [ $exit_code -ne 0 ]; then
+        TOTAL_FAILED=$((TOTAL_FAILED + 1))
+        REPORT="$REPORT\n--- $label FAILED ---\n$output\n"
+    fi
+
+    return $exit_code
+}
+
+# ── 검증 실행 ─────────────────────────────────────────────────
+run_check "1/3 LINT (컴파일 검증)"          "lint.sh"
+run_check "2/3 OWNERSHIP (소유권 검증)"     "check_ownership.sh"
+run_check "3/3 BINARY_MODE (fopen 검증)"    "check_binary_mode.sh"
+
+# ── 결과 처리 ─────────────────────────────────────────────────
+echo ""
+echo "============================================================"
+
+if [ $TOTAL_FAILED -eq 0 ]; then
+    echo "  ALL CHECKS PASSED — 커밋 허용"
+    echo "============================================================"
+    # 성공 로그 (간결하게)
+    echo "[$TIMESTAMP] PASSED" >> "$LOG_FILE"
+    exit 0
+fi
+
+# ── 실패: 로그 기록 + 커밋 차단 ──────────────────────────────
+echo "  BLOCKED — $TOTAL_FAILED 개 검증 실패"
+echo "  로그: logs/pre_commit_failures.log"
+echo "  AGENT.md 섹션 6 (코딩 규칙) 을 확인하세요."
+echo "============================================================"
+
+{
+    echo ""
+    echo "========================================"
+    echo " [$TIMESTAMP] BLOCKED ($TOTAL_FAILED failures)"
+    echo "========================================"
+    # 스테이징 파일 목록 기록
+    echo "Staged files:"
+    git diff --cached --name-only | sed 's/^/  /'
+    echo ""
+    # 실패 상세 내용 기록
+    echo -e "$REPORT"
+} >> "$LOG_FILE"
+
+exit 1

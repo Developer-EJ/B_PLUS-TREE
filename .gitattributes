@@ -24,6 +24,7 @@ Makefile text eol=lf
 
 # 설정 / 스크립트
 *.sh         text eol=lf
+.githooks/*  text eol=lf
 *.sql        text eol=lf
 *.schema     text eol=lf
 *.md         text eol=lf

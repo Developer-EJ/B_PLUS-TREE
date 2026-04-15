@@ -270,7 +270,7 @@ static ResultSet *linear_scan(const SelectStmt *stmt,
     char path[256];
     snprintf(path, sizeof(path), "data/%s.dat", stmt->table);
 
-    FILE *fp = fopen(path, "r");
+    FILE *fp = fopen(path, "rb");
     if (!fp) return make_empty_rs(schema);
 
     Row *rows     = NULL;
