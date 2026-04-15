@@ -1,16 +1,3 @@
-/* =========================================================
- * test_perf.c - performance benchmark harness
- *
- * Build:
- *   make perf       -> ./test_perf
- *   make perf_sim   -> ./test_perf_sim
- *
- * Data flow:
- *   ./gen_data 1000000 users
- *   ./sqlp samples/bench_users.sql
- *   ./test_perf users 1000000
- * ========================================================= */
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,6 +6,7 @@
 #include "../include/bptree.h"
 #include "../include/interface.h"
 #include "../include/index_manager.h"
+#include "../src/executor/executor_internal.h"
 
 #define BENCH_RUNS 3
 
@@ -32,11 +20,8 @@ typedef struct {
     double avg_ms;
     int    rows;
     int    tree_h;
+    int    tree_io;
 } BenchResult;
-
-/* Private benchmark hook from src/executor/executor.c. */
-ResultSet *db_select_bench(const SelectStmt *stmt, const TableSchema *schema,
-                           int force_linear);
 
 static double now_ms(void) {
     return (double)clock() * 1000.0 / (double)CLOCKS_PER_SEC;
@@ -168,8 +153,8 @@ static void print_result_row(const char *label, const BenchResult *result) {
     else
         copy_text(tree_buf, sizeof(tree_buf), "-");
 
-    printf("  %-35s %10.3f ms  rows=%-8d  tree_h=%s\n",
-           label, result->avg_ms, result->rows, tree_buf);
+    printf("  %-35s %10.3f ms  rows=%-8d  tree_h=%-3s  tree_io=%d\n",
+           label, result->avg_ms, result->rows, tree_buf, result->tree_io);
 }
 
 static void print_speedup_or_mismatch(const char *label,
@@ -193,7 +178,7 @@ static void print_speedup_or_mismatch(const char *label,
 static void print_separator(void) {
     printf("  %s\n",
            "-------------------------------------------------------------------"
-           "------");
+           "--------------------");
 }
 
 static int raw_scan_count(const char *table, const SelectStmt *stmt,
@@ -231,6 +216,7 @@ static int measure_raw_linear(const char *table, const SelectStmt *stmt,
     out->avg_ms = total / BENCH_RUNS;
     out->rows = rows;
     out->tree_h = TREE_NONE;
+    out->tree_io = 0;
     return SQL_OK;
 }
 
@@ -240,6 +226,7 @@ static int measure_raw_id_point(const char *table, int target_id,
     long offset = -1;
 
     for (int i = 0; i < BENCH_RUNS; i++) {
+        index_reset_io_stats(table);
         double t0 = now_ms();
         offset = index_search_id(table, target_id);
         total += now_ms() - t0;
@@ -248,48 +235,51 @@ static int measure_raw_id_point(const char *table, int target_id,
     out->avg_ms = total / BENCH_RUNS;
     out->rows = (offset >= 0) ? 1 : 0;
     out->tree_h = index_height_id(table);
+    out->tree_io = index_last_io_id(table);
     return SQL_OK;
 }
 
 static int measure_raw_id_range(const char *table, int from, int to,
                                 BenchResult *out) {
-    long *offsets = (long *)calloc(IDX_MAX_RANGE, sizeof(long));
-    if (!offsets) return SQL_ERR;
-
     double total = 0.0;
     int rows = 0;
-    for (int i = 0; i < BENCH_RUNS; i++) {
-        double t0 = now_ms();
-        rows = index_range_id(table, from, to, offsets, IDX_MAX_RANGE);
-        total += now_ms() - t0;
-    }
 
-    free(offsets);
+    for (int i = 0; i < BENCH_RUNS; i++) {
+        index_reset_io_stats(table);
+        double t0 = now_ms();
+        int count = 0;
+        long *offsets = index_range_id_alloc(table, from, to, &count);
+        total += now_ms() - t0;
+        rows = count;
+        free(offsets);
+    }
 
     out->avg_ms = total / BENCH_RUNS;
     out->rows = rows;
     out->tree_h = index_height_id(table);
+    out->tree_io = index_last_io_id(table);
     return SQL_OK;
 }
 
 static int measure_raw_age_range(const char *table, int from, int to,
                                  BenchResult *out) {
-    long *offsets = (long *)calloc(IDX_MAX_RANGE, sizeof(long));
-    if (!offsets) return SQL_ERR;
-
     double total = 0.0;
     int rows = 0;
-    for (int i = 0; i < BENCH_RUNS; i++) {
-        double t0 = now_ms();
-        rows = index_range_age(table, from, to, offsets, IDX_MAX_RANGE);
-        total += now_ms() - t0;
-    }
 
-    free(offsets);
+    for (int i = 0; i < BENCH_RUNS; i++) {
+        index_reset_io_stats(table);
+        double t0 = now_ms();
+        int count = 0;
+        long *offsets = index_range_age_alloc(table, from, to, &count);
+        total += now_ms() - t0;
+        rows = count;
+        free(offsets);
+    }
 
     out->avg_ms = total / BENCH_RUNS;
     out->rows = rows;
     out->tree_h = index_height_age(table);
+    out->tree_io = index_last_io_age(table);
     return SQL_OK;
 }
 
@@ -299,21 +289,25 @@ static int measure_executor_select(const SelectStmt *stmt,
                                    BenchResult *out) {
     double total = 0.0;
     int rows = 0;
+    SelectExecInfo info = {0};
 
     for (int i = 0; i < BENCH_RUNS; i++) {
+        SelectExecInfo current = {0};
         double t0 = now_ms();
-        ResultSet *rs = db_select_bench(stmt, schema, force_linear);
+        ResultSet *rs = db_select_mode(stmt, schema, force_linear, 0, &current);
         double elapsed = now_ms() - t0;
         if (!rs) return SQL_ERR;
 
         rows = rs->row_count;
         total += elapsed;
+        info = current;
         result_free(rs);
     }
 
     out->avg_ms = total / BENCH_RUNS;
     out->rows = rows;
     out->tree_h = force_linear ? TREE_NONE : tree_height(stmt->table, kind);
+    out->tree_io = force_linear ? 0 : info.tree_io;
     return SQL_OK;
 }
 
@@ -458,8 +452,6 @@ static int bench_height_comparison(const char *table, const TableSchema *schema,
     print_speedup_or_mismatch("Executor speedup (order4/order128)",
                               &exec_default, &exec_small);
     print_separator();
-    printf("  Rebuild with make perf_sim to highlight height-related I/O delay.\n");
-
     return init_index_for_order(table, IDX_ORDER_DEFAULT);
 }
 
@@ -472,8 +464,7 @@ int main(int argc, char *argv[]) {
     printf("  B+ Tree Performance Benchmark\n");
     printf("  Table: %s  |  Rows: %d\n", table, rows);
 #if BPTREE_SIMULATE_IO
-    printf("  Mode: Disk I/O Simulation ON (%d us/level)\n",
-           DISK_IO_DELAY_US);
+    printf("  Mode: B+Tree page-read simulation ON\n");
 #else
     printf("  Mode: In-Memory (no I/O simulation)\n");
 #endif
@@ -495,11 +486,12 @@ int main(int argc, char *argv[]) {
     printf("\nInitializing index for '%s'...\n", table);
     index_cleanup();
     if (index_init(table, IDX_ORDER_DEFAULT, IDX_ORDER_DEFAULT) != 0) {
-        fprintf(stderr, "index_init failed. "
-                "Run ./sqlp samples/bench_%s.sql first.\n", table);
+        fprintf(stderr, "index_init failed. Run ./sqlp samples/bench_%s.sql first.\n",
+                table);
         schema_free(schema);
         return 1;
     }
+
     printf("  tree_h(id)=%d  tree_h(age)=%d\n",
            index_height_id(table), index_height_age(table));
 
