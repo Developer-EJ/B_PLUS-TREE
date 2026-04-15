@@ -38,6 +38,17 @@ static double now_ms(void) {
  * 내부 헬퍼
  * ========================================================= */
 
+static char *dup_string(const char *src) {
+    if (!src) src = "";
+
+    size_t len = strlen(src) + 1;
+    char *copy = (char *)malloc(len);
+    if (!copy) return NULL;
+
+    memcpy(copy, src, len);
+    return copy;
+}
+
 /* 빈 ResultSet 반환 */
 static ResultSet *make_empty_rs(const TableSchema *schema) {
     ResultSet *rs = (ResultSet *)calloc(1, sizeof(ResultSet));
@@ -46,7 +57,7 @@ static ResultSet *make_empty_rs(const TableSchema *schema) {
     rs->col_names  = (char **)calloc(rs->col_count, sizeof(char *));
     if (!rs->col_names) { free(rs); return NULL; }
     for (int i = 0; i < rs->col_count; i++)
-        rs->col_names[i] = strdup(schema->columns[i].name);
+        rs->col_names[i] = dup_string(schema->columns[i].name);
     rs->row_count = 0;
     rs->rows      = NULL;
     return rs;
@@ -68,6 +79,7 @@ static int line_matches_where(const char *line, const SelectStmt *stmt,
 
     char tmp[1024];
     strncpy(tmp, line, sizeof(tmp) - 1);
+    tmp[sizeof(tmp) - 1] = '\0';
     char *tok = strtok(tmp, "|");
     for (int i = 0; i < col_idx && tok; i++)
         tok = strtok(NULL, "|");
@@ -89,6 +101,7 @@ static Row parse_line_to_row(const char *line, const TableSchema *schema) {
 
     char buf[1024];
     strncpy(buf, line, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
     char *tok = strtok(buf, "|");
     for (int i = 0; i < row.count; i++) {
         if (tok) {
@@ -96,7 +109,7 @@ static Row parse_line_to_row(const char *line, const TableSchema *schema) {
             char *end = tok + strlen(tok) - 1;
             while (end > tok && *end == ' ') *end-- = '\0';
         }
-        row.values[i] = strdup(tok ? tok : "");
+        row.values[i] = dup_string(tok ? tok : "");
         tok = strtok(NULL, "|");
     }
     return row;
@@ -153,7 +166,7 @@ static ResultSet *build_resultset(Row *rows, int row_count,
         rs->col_count = schema->column_count;
         rs->col_names = (char **)calloc(rs->col_count, sizeof(char *));
         for (int i = 0; i < rs->col_count; i++)
-            rs->col_names[i] = strdup(schema->columns[i].name);
+            rs->col_names[i] = dup_string(schema->columns[i].name);
         rs->rows      = rows;
         rs->row_count = row_count;
     } else {
@@ -162,7 +175,7 @@ static ResultSet *build_resultset(Row *rows, int row_count,
         int *idx      = (int *)calloc(rs->col_count, sizeof(int));
 
         for (int c = 0; c < stmt->column_count; c++) {
-            rs->col_names[c] = strdup(stmt->columns[c]);
+            rs->col_names[c] = dup_string(stmt->columns[c]);
             idx[c] = -1;
             for (int s = 0; s < schema->column_count; s++) {
                 if (strcmp(schema->columns[s].name, stmt->columns[c]) == 0) {
@@ -178,7 +191,7 @@ static ResultSet *build_resultset(Row *rows, int row_count,
             rs->rows[r].values = (char **)calloc(rs->col_count, sizeof(char *));
             for (int c = 0; c < rs->col_count; c++) {
                 int si = idx[c];
-                rs->rows[r].values[c] = strdup(
+                rs->rows[r].values[c] = dup_string(
                     (si >= 0 && si < rows[r].count) ? rows[r].values[si] : "");
             }
             for (int j = 0; j < rows[r].count; j++) free(rows[r].values[j]);
