@@ -27,10 +27,55 @@ typedef enum {
     RUN_MODE_COMPARE = 2
 } RunMode;
 
+#define COMPARE_LABEL_WIDTH 18
+
+/* ?? ??? ???? stderr ?? ??? ?? ???? ??? ?? ?? ????. */
+static int utf8_display_width(const char *text) {
+    int width = 0;
+    const unsigned char *p = (const unsigned char *)text;
+
+    while (*p) {
+        if ((*p & 0x80) == 0x00) {
+            width += 1;
+            p += 1;
+        } else if ((*p & 0xE0) == 0xC0) {
+            width += 2;
+            p += 2;
+        } else if ((*p & 0xF0) == 0xE0) {
+            width += 2;
+            p += 3;
+        } else if ((*p & 0xF8) == 0xF0) {
+            width += 2;
+            p += 4;
+        } else {
+            width += 1;
+            p += 1;
+        }
+    }
+
+    return width;
+}
+
+static void print_stderr_label(const char *label) {
+    int pad = COMPARE_LABEL_WIDTH - utf8_display_width(label);
+
+    fprintf(stderr, "  %s", label);
+    while (pad-- > 0)
+        fputc(' ', stderr);
+}
+
+static void print_compare_result_line(const char *label,
+                                      const SelectExecInfo *info) {
+    print_stderr_label(label);
+    fprintf(stderr,
+            "\uACBD\uB85C=%-18s  \uC2DC\uAC04=%8.3f ms  \uD2B8\uB9ACI/O=%d\n",
+            info->path, info->elapsed_ms, info->tree_io);
+}
+
 /* ResultSet을 간단한 SQL 클라이언트 스타일 표로 출력한다. */
 static void print_pretty_table(ResultSet *rs) {
     if (!rs || rs->row_count == 0) {
-        printf("(0 rows)\n");
+        printf("(0\uD589)\n");
         return;
     }
 
@@ -66,7 +111,7 @@ static void print_pretty_table(ResultSet *rs) {
     }
 
     PRINT_SEP();
-    printf("(%d row%s)\n", rs->row_count, rs->row_count == 1 ? "" : "s");
+    printf("(%d\uD589)\n", rs->row_count);
 
     free(widths);
 #undef PRINT_SEP
@@ -129,28 +174,24 @@ static void print_compare_summary(const SelectExecInfo *auto_info,
                                   const SelectExecInfo *linear_info) {
     if (!auto_info || !linear_info) return;
 
+    fprintf(stderr, "[\uBE44\uAD50 \uC694\uC57D]\n");
+    print_compare_result_line("\uAE30\uBCF8 \uC2E4\uD589:", auto_info);
+    print_compare_result_line("\uC120\uD615 \uC2A4\uCE94:", linear_info);
+
     if (auto_info->row_count != linear_info->row_count) {
         fprintf(stderr,
-                "[COMPARE] auto=%s/%.3fms/%d linear=%s/%.3fms/%d "
-                "mismatch(auto=%d, linear=%d)\n",
-                auto_info->path, auto_info->elapsed_ms, auto_info->tree_io,
-                linear_info->path, linear_info->elapsed_ms, linear_info->tree_io,
+                "  \uACB0\uACFC \uD589\uC218 \uBD88\uC77C\uCE58: \uAE30\uBCF8=%d\uD589, \uC120\uD615=%d\uD589\n",
                 auto_info->row_count, linear_info->row_count);
         return;
     }
 
     if (auto_info->elapsed_ms <= 0.0) {
-        fprintf(stderr,
-                "[COMPARE] auto=%s/%.3fms/%d linear=%s/%.3fms/%d speedup=n/a\n",
-                auto_info->path, auto_info->elapsed_ms, auto_info->tree_io,
-                linear_info->path, linear_info->elapsed_ms, linear_info->tree_io);
+        fprintf(stderr, "  \uC18D\uB3C4\uBE44\uC728: \uACC4\uC0B0 \uBD88\uAC00\n");
         return;
     }
 
     fprintf(stderr,
-            "[COMPARE] auto=%s/%.3fms/%d linear=%s/%.3fms/%d speedup=%.2fx\n",
-            auto_info->path, auto_info->elapsed_ms, auto_info->tree_io,
-            linear_info->path, linear_info->elapsed_ms, linear_info->tree_io,
+            "  \uC18D\uB3C4\uBE44\uC728: \uC120\uD615/\uAE30\uBCF8 = %.2fx\n",
             linear_info->elapsed_ms / auto_info->elapsed_ms);
 }
 
@@ -179,9 +220,9 @@ static int run_select(const SelectStmt *stmt, const TableSchema *schema,
         }
 
         /* compare 모드의 출력 순서는 항상 auto -> linear로 고정한다. */
-        printf("[AUTO RESULT]\n");
+        printf("[\uAE30\uBCF8 \uC2E4\uD589 \uACB0\uACFC]\n");
         print_pretty_table(auto_rs);
-        printf("[LINEAR RESULT]\n");
+        printf("[\uC120\uD615 \uC2A4\uCE94 \uACB0\uACFC]\n");
         print_pretty_table(linear_rs);
         print_compare_summary(&auto_info, &linear_info);
 

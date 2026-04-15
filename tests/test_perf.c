@@ -9,6 +9,42 @@
 #include "../src/executor/executor_internal.h"
 
 #define BENCH_RUNS 3
+#define BENCH_LABEL_WIDTH 34
+
+/* ?? ??? ???? ?? ??? ??? ???? ????? ?? ?? ????. */
+static int utf8_display_width(const char *text) {
+    int width = 0;
+    const unsigned char *p = (const unsigned char *)text;
+
+    while (*p) {
+        if ((*p & 0x80) == 0x00) {
+            width += 1;
+            p += 1;
+        } else if ((*p & 0xE0) == 0xC0) {
+            width += 2;
+            p += 2;
+        } else if ((*p & 0xF0) == 0xE0) {
+            width += 2;
+            p += 3;
+        } else if ((*p & 0xF8) == 0xF0) {
+            width += 2;
+            p += 4;
+        } else {
+            width += 1;
+            p += 1;
+        }
+    }
+
+    return width;
+}
+
+static void print_label_prefix(const char *label) {
+    int pad = BENCH_LABEL_WIDTH - utf8_display_width(label);
+
+    printf("  %s", label);
+    while (pad-- > 0)
+        putchar(' ');
+}
 
 /*
  * test_perf.c
@@ -41,6 +77,70 @@ typedef struct {
     int    tree_h;
     int    tree_io;
 } BenchResult;
+
+typedef enum {
+    BENCH_ALL = 0,
+    BENCH_POINT = 1,
+    BENCH_ID_RANGE = 2,
+    BENCH_ID_RANGE_LARGE = 3,
+    BENCH_AGE_RANGE = 4,
+    BENCH_HEIGHT = 5
+} BenchCase;
+
+static const char *bench_case_label(BenchCase bench_case) {
+    switch (bench_case) {
+    case BENCH_POINT:
+        return "\uB2E8\uAC74 \uC870\uD68C";
+    case BENCH_ID_RANGE:
+        return "\uBC94\uC704 \uC870\uD68C(id)";
+    case BENCH_ID_RANGE_LARGE:
+        return "\uB300\uBC94\uC704 \uC870\uD68C(id)";
+    case BENCH_AGE_RANGE:
+        return "\uBC94\uC704 \uC870\uD68C(age)";
+    case BENCH_HEIGHT:
+        return "\uB192\uC774 \uBE44\uAD50";
+    case BENCH_ALL:
+    default:
+        return "\uC804\uCCB4";
+    }
+}
+
+static int parse_bench_case(const char *name, BenchCase *out) {
+    if (!out) return 0;
+
+    if (!name || strcmp(name, "all") == 0) {
+        *out = BENCH_ALL;
+        return 1;
+    }
+    if (strcmp(name, "point") == 0) {
+        *out = BENCH_POINT;
+        return 1;
+    }
+    if (strcmp(name, "id-range") == 0) {
+        *out = BENCH_ID_RANGE;
+        return 1;
+    }
+    if (strcmp(name, "id-range-large") == 0) {
+        *out = BENCH_ID_RANGE_LARGE;
+        return 1;
+    }
+    if (strcmp(name, "age-range") == 0) {
+        *out = BENCH_AGE_RANGE;
+        return 1;
+    }
+    if (strcmp(name, "height") == 0) {
+        *out = BENCH_HEIGHT;
+        return 1;
+    }
+
+    return 0;
+}
+
+static void print_usage(const char *argv0) {
+    fprintf(stderr,
+            "\uC0AC\uC6A9\uBC95: %s [table] [rows] [all|point|id-range|id-range-large|age-range|height]\n",
+            argv0);
+}
 
 static double now_ms(void) {
     return (double)clock() * 1000.0 / (double)CLOCKS_PER_SEC;
@@ -188,8 +288,9 @@ static void print_result_row(const char *label, const BenchResult *result) {
     else
         copy_text(tree_buf, sizeof(tree_buf), "-");
 
-    printf("  %-35s %10.3f ms  rows=%-8d  tree_h=%-3s  tree_io=%d\n",
-           label, result->avg_ms, result->rows, tree_buf, result->tree_io);
+    print_label_prefix(label);
+    printf("\uC2DC\uAC04=%10.3f ms  \uD589\uC218=%-8d  \uD2B8\uB9AC\uB192\uC774=%-3s  \uD2B8\uB9ACI/O=%d\n",
+           result->avg_ms, result->rows, tree_buf, result->tree_io);
 }
 
 /*
@@ -200,18 +301,20 @@ static void print_speedup_or_mismatch(const char *label,
                                       const BenchResult *index_result,
                                       const BenchResult *linear_result) {
     if (index_result->rows != linear_result->rows) {
-        printf("  %-35s mismatch (index=%d, linear=%d)\n",
-               label, index_result->rows, linear_result->rows);
+        print_label_prefix(label);
+        printf("\uACB0\uACFC \uBD88\uC77C\uCE58(\uC778\uB371\uC2A4=%d, \uC120\uD615=%d)\n",
+               index_result->rows, linear_result->rows);
         return;
     }
 
     if (index_result->avg_ms <= 0.0) {
-        printf("  %-35s n/a\n", label);
+        print_label_prefix(label);
+        printf("\uACC4\uC0B0 \uBD88\uAC00\n");
         return;
     }
 
-    printf("  %-35s %10.2fx\n",
-           label, linear_result->avg_ms / index_result->avg_ms);
+    print_label_prefix(label);
+    printf("%10.2fx\n", linear_result->avg_ms / index_result->avg_ms);
 }
 
 static void print_separator(void) {
@@ -387,7 +490,7 @@ static int bench_point_search(const char *table, const TableSchema *schema,
     BenchResult exec_linear;
 
     snprintf(id_buf, sizeof(id_buf), "%d", target_id);
-    /* 벤치용 SELECT AST를 직접 구성해서 parser 비용은 제외한다. */
+    /* ??? SELECT AST? ?? ???? parser ??? ????. */
     init_select_eq(&stmt, table, "id", id_buf);
     if (validate_select_stmt(&stmt, schema) != SQL_OK) return SQL_ERR;
 
@@ -397,21 +500,22 @@ static int bench_point_search(const char *table, const TableSchema *schema,
         measure_executor_select(&stmt, schema, 1, TREE_ID, &exec_linear) != SQL_OK)
         return SQL_ERR;
 
-    printf("\n[Test 1] Point Search: WHERE id = %d\n", target_id);
+    printf("\n[\uD14C\uC2A4\uD2B8 1] \uB2E8\uAC74 \uC870\uD68C: WHERE id = %d\n", target_id);
     print_separator();
-    print_result_row("Raw index (id point)", &raw_index);
-    print_result_row("Raw linear", &raw_linear);
-    print_speedup_or_mismatch("Raw speedup (linear/index)", &raw_index, &raw_linear);
-    print_result_row("Executor index (auto)", &exec_index);
-    print_result_row("Executor linear (forced)", &exec_linear);
-    print_speedup_or_mismatch("Executor speedup (linear/index)",
-                              &exec_index, &exec_linear);
+    print_result_row("\uD0D0\uC0C9 \uC2DC\uAC04: \uC778\uB371\uC2A4", &raw_index);
+    print_result_row("\uD0D0\uC0C9 \uC2DC\uAC04: \uC120\uD615 \uC2A4\uCE94", &raw_linear);
+    print_speedup_or_mismatch("\uD0D0\uC0C9 \uC2DC\uAC04 \uC18D\uB3C4\uBE44\uC728: \uC120\uD615/\uC778\uB371\uC2A4", &raw_index, &raw_linear);
+    printf("\n");
+    print_result_row("\uC2E4\uC81C \uC2E4\uD589: \uC778\uB371\uC2A4", &exec_index);
+    print_result_row("\uC2E4\uC81C \uC2E4\uD589: \uC120\uD615 \uC2A4\uCE94", &exec_linear);
+    print_speedup_or_mismatch("\uC2E4\uC81C \uC2E4\uD589 \uC18D\uB3C4\uBE44\uC728: \uC120\uD615/\uC778\uB371\uC2A4", &exec_index, &exec_linear);
     print_separator();
     return SQL_OK;
 }
 
 /* 2번 테스트: id 범위 조회 비교 */
 static int bench_id_range_search(const char *table, const TableSchema *schema,
+                                 int test_no, const char *title,
                                  int from, int to) {
     char from_buf[32];
     char to_buf[32];
@@ -423,7 +527,7 @@ static int bench_id_range_search(const char *table, const TableSchema *schema,
 
     snprintf(from_buf, sizeof(from_buf), "%d", from);
     snprintf(to_buf, sizeof(to_buf), "%d", to);
-    /* 같은 논리 쿼리를 Raw / Executor 양쪽에 동일하게 넣기 위해 AST를 직접 만든다. */
+    /* ?? ?? ??? Raw / Executor ??? ???? ?? ?? AST? ?? ???. */
     init_select_between(&stmt, table, "id", from_buf, to_buf);
     if (validate_select_stmt(&stmt, schema) != SQL_OK) return SQL_ERR;
 
@@ -433,16 +537,16 @@ static int bench_id_range_search(const char *table, const TableSchema *schema,
         measure_executor_select(&stmt, schema, 1, TREE_ID, &exec_linear) != SQL_OK)
         return SQL_ERR;
 
-    printf("\n[Test 2] Range Search (id): WHERE id BETWEEN %d AND %d\n",
-           from, to);
+    printf("\n[\uD14C\uC2A4\uD2B8 %d] %s: WHERE id BETWEEN %d AND %d\n",
+           test_no, title, from, to);
     print_separator();
-    print_result_row("Raw index (id range)", &raw_index);
-    print_result_row("Raw linear", &raw_linear);
-    print_speedup_or_mismatch("Raw speedup (linear/index)", &raw_index, &raw_linear);
-    print_result_row("Executor index (auto)", &exec_index);
-    print_result_row("Executor linear (forced)", &exec_linear);
-    print_speedup_or_mismatch("Executor speedup (linear/index)",
-                              &exec_index, &exec_linear);
+    print_result_row("\uD0D0\uC0C9 \uC2DC\uAC04: \uC778\uB371\uC2A4", &raw_index);
+    print_result_row("\uD0D0\uC0C9 \uC2DC\uAC04: \uC120\uD615 \uC2A4\uCE94", &raw_linear);
+    print_speedup_or_mismatch("\uD0D0\uC0C9 \uC2DC\uAC04 \uC18D\uB3C4\uBE44\uC728: \uC120\uD615/\uC778\uB371\uC2A4", &raw_index, &raw_linear);
+    printf("\n");
+    print_result_row("\uC2E4\uC81C \uC2E4\uD589: \uC778\uB371\uC2A4", &exec_index);
+    print_result_row("\uC2E4\uC81C \uC2E4\uD589: \uC120\uD615 \uC2A4\uCE94", &exec_linear);
+    print_speedup_or_mismatch("\uC2E4\uC81C \uC2E4\uD589 \uC18D\uB3C4\uBE44\uC728: \uC120\uD615/\uC778\uB371\uC2A4", &exec_index, &exec_linear);
     print_separator();
     return SQL_OK;
 }
@@ -460,7 +564,7 @@ static int bench_age_range_search(const char *table, const TableSchema *schema,
 
     snprintf(from_buf, sizeof(from_buf), "%d", from);
     snprintf(to_buf, sizeof(to_buf), "%d", to);
-    /* age 범위 조회는 보조 인덱스의 장단점이 드러나는 대표 케이스다. */
+    /* age ?? ??? ?? ???? ???? ???? ?? ????. */
     init_select_between(&stmt, table, "age", from_buf, to_buf);
     if (validate_select_stmt(&stmt, schema) != SQL_OK) return SQL_ERR;
 
@@ -470,16 +574,15 @@ static int bench_age_range_search(const char *table, const TableSchema *schema,
         measure_executor_select(&stmt, schema, 1, TREE_AGE, &exec_linear) != SQL_OK)
         return SQL_ERR;
 
-    printf("\n[Test 3] Range Search (age): WHERE age BETWEEN %d AND %d\n",
-           from, to);
+    printf("\n[\uD14C\uC2A4\uD2B8 4] \uBC94\uC704 \uC870\uD68C(age): WHERE age BETWEEN %d AND %d\n", from, to);
     print_separator();
-    print_result_row("Raw index (age range)", &raw_index);
-    print_result_row("Raw linear", &raw_linear);
-    print_speedup_or_mismatch("Raw speedup (linear/index)", &raw_index, &raw_linear);
-    print_result_row("Executor index (auto)", &exec_index);
-    print_result_row("Executor linear (forced)", &exec_linear);
-    print_speedup_or_mismatch("Executor speedup (linear/index)",
-                              &exec_index, &exec_linear);
+    print_result_row("\uD0D0\uC0C9 \uC2DC\uAC04: \uC778\uB371\uC2A4", &raw_index);
+    print_result_row("\uD0D0\uC0C9 \uC2DC\uAC04: \uC120\uD615 \uC2A4\uCE94", &raw_linear);
+    print_speedup_or_mismatch("\uD0D0\uC0C9 \uC2DC\uAC04 \uC18D\uB3C4\uBE44\uC728: \uC120\uD615/\uC778\uB371\uC2A4", &raw_index, &raw_linear);
+    printf("\n");
+    print_result_row("\uC2E4\uC81C \uC2E4\uD589: \uC778\uB371\uC2A4", &exec_index);
+    print_result_row("\uC2E4\uC81C \uC2E4\uD589: \uC120\uD615 \uC2A4\uCE94", &exec_linear);
+    print_speedup_or_mismatch("\uC2E4\uC81C \uC2E4\uD589 \uC18D\uB3C4\uBE44\uC728: \uC120\uD615/\uC778\uB371\uC2A4", &exec_index, &exec_linear);
     print_separator();
     return SQL_OK;
 }
@@ -516,22 +619,21 @@ static int bench_height_comparison(const char *table, const TableSchema *schema,
         measure_executor_select(&stmt, schema, 0, TREE_ID, &exec_small) != SQL_OK)
         return SQL_ERR;
 
-    /* 같은 데이터로 order만 바꿔 다시 만들고 동일한 point query를 한 번 더 잰다. */
+    /* ?? ???? order? ?? ?? ??? ??? point query? ? ? ? ??. */
     if (init_index_for_order(table, IDX_ORDER_DEFAULT) != 0) return SQL_ERR;
     if (measure_raw_id_point(table, target_id, &raw_default) != SQL_OK ||
         measure_executor_select(&stmt, schema, 0, TREE_ID, &exec_default) != SQL_OK)
         return SQL_ERR;
 
-    printf("\n[Test 4] Height Comparison: order=4 vs order=128\n");
+    printf("\n[\uD14C\uC2A4\uD2B8 5] \uB192\uC774 \uBE44\uAD50: order=4 vs order=128\n");
     print_separator();
-    print_result_row("Raw order=4", &raw_small);
-    print_result_row("Raw order=128", &raw_default);
-    print_speedup_or_mismatch("Raw speedup (order4/order128)",
-                              &raw_default, &raw_small);
-    print_result_row("Executor order=4", &exec_small);
-    print_result_row("Executor order=128", &exec_default);
-    print_speedup_or_mismatch("Executor speedup (order4/order128)",
-                              &exec_default, &exec_small);
+    print_result_row("\uD0D0\uC0C9 \uC2DC\uAC04: order=4", &raw_small);
+    print_result_row("\uD0D0\uC0C9 \uC2DC\uAC04: order=128", &raw_default);
+    print_speedup_or_mismatch("\uD0D0\uC0C9 \uC2DC\uAC04 \uC18D\uB3C4\uBE44\uC728: order4/order128", &raw_default, &raw_small);
+    printf("\n");
+    print_result_row("\uC2E4\uC81C \uC2E4\uD589: order=4", &exec_small);
+    print_result_row("\uC2E4\uC81C \uC2E4\uD589: order=128", &exec_default);
+    print_speedup_or_mismatch("\uC2E4\uC81C \uC2E4\uD589 \uC18D\uB3C4\uBE44\uC728: order4/order128", &exec_default, &exec_small);
     print_separator();
     return init_index_for_order(table, IDX_ORDER_DEFAULT);
 }
@@ -539,17 +641,26 @@ static int bench_height_comparison(const char *table, const TableSchema *schema,
 int main(int argc, char *argv[]) {
     const char *table = (argc > 1) ? argv[1] : "users";
     int rows = (argc > 2) ? atoi(argv[2]) : 1000000;
+    const char *case_name = (argc > 3) ? argv[3] : "all";
+    int large_range_to = (rows > 0) ? rows : 1;
+    BenchCase bench_case = BENCH_ALL;
     TableSchema *schema = NULL;
 
-    /* CLI 인자는 테이블 이름과, 출력 라벨에 쓸 예상 row 수다. */
+    if (!parse_bench_case(case_name, &bench_case)) {
+        print_usage(argv[0]);
+        return 1;
+    }
+
+    /* CLI ??? ??? ???, ?? ??? ? ?? row ??. */
     printf("============================================================\n");
-    printf("  B+ Tree Performance Benchmark\n");
-    printf("  Table: %s  |  Rows: %d\n", table, rows);
+    printf("  B+\uD2B8\uB9AC \uC131\uB2A5 \uBCA4\uCE58\uB9C8\uD06C\n");
+    printf("  \uD14C\uC774\uBE14: %s  |  \uD589 \uC218: %d\n", table, rows);
 #if BPTREE_SIMULATE_IO
-    printf("  Mode: B+Tree page-read simulation ON\n");
+    printf("  \uBAA8\uB4DC: B+\uD2B8\uB9AC \uD398\uC774\uC9C0 \uC77D\uAE30 \uC2DC\uBBAC\uB808\uC774\uC158 \uCF1C\uC9D0\n");
 #else
-    printf("  Mode: In-Memory (no I/O simulation)\n");
+    printf("  \uBAA8\uB4DC: \uBA54\uBAA8\uB9AC \uAE30\uBC18 (I/O \uC2DC\uBBAC\uB808\uC774\uC158 \uAEBC\uC9D0)\n");
 #endif
+    printf("  \uC2E4\uD589 \uD56D\uBAA9: %s\n", bench_case_label(bench_case));
     printf("============================================================\n");
 
     schema = schema_load(table);
@@ -559,42 +670,52 @@ int main(int argc, char *argv[]) {
     }
 
     /*
-     * test_perf는 일부러 데이터를 자동 적재하지 않는다.
-     * 벤치 단계에서 측정하고 싶은 것은 데이터 준비가 아니라 조회 비용이기 때문이다.
+     * test_perf? ??? ???? ?? ???? ???.
+     * ?? ???? ???? ?? ?? ??? ??? ??? ?? ???? ????.
      */
     if (!data_file_exists(table)) {
-        fprintf(stderr, "benchmark data missing for '%s'.\n", table);
-        fprintf(stderr, "Run ./sqlp samples/bench_%s.sql first.\n", table);
+        fprintf(stderr, "\uBCA4\uCE58\uB9C8\uD06C \uB370\uC774\uD130\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4: '%s'\n", table);
+        fprintf(stderr, "\uBA3C\uC800 ./sqlp samples/bench_%s.sql \uC744 \uC2E4\uD589\uD558\uC138\uC694.\n", table);
         schema_free(schema);
         return 1;
     }
 
-    printf("\nInitializing index for '%s'...\n", table);
+    printf("\n'%s' \uC778\uB371\uC2A4 \uCD08\uAE30\uD654 \uC911...\n", table);
     index_cleanup();
     if (index_init(table, IDX_ORDER_DEFAULT, IDX_ORDER_DEFAULT) != 0) {
-        fprintf(stderr, "index_init failed. Run ./sqlp samples/bench_%s.sql first.\n",
+        fprintf(stderr, "index_init \uC2E4\uD328. \uBA3C\uC800 ./sqlp samples/bench_%s.sql \uC744 \uC2E4\uD589\uD558\uC138\uC694.\n",
                 table);
         schema_free(schema);
         return 1;
     }
 
-    /* 초기 높이를 먼저 보여 주면 뒤의 benchmark 결과를 해석하기 쉬워진다. */
-    printf("  tree_h(id)=%d  tree_h(age)=%d\n",
+    /* ?? ??? ?? ?? ?? ?? benchmark ??? ???? ????. */
+    printf("  \uCD08\uAE30 \uD2B8\uB9AC \uB192\uC774: id=%d  age=%d\n",
            index_height_id(table), index_height_age(table));
 
-    /* 아래 네 섹션이 현재 1차 성능 리포트 전체를 이룬다. */
-    if (bench_point_search(table, schema, rows / 2) != SQL_OK ||
-        bench_id_range_search(table, schema, rows / 4, rows / 2) != SQL_OK ||
-        bench_age_range_search(table, schema, 30, 40) != SQL_OK ||
-        bench_height_comparison(table, schema, rows / 2) != SQL_OK) {
-        fprintf(stderr, "benchmark failed.\n");
+    /* ?? ? ??? ?? 1? ?? ??? ??? ???. */
+    if (((bench_case == BENCH_ALL || bench_case == BENCH_POINT) &&
+         bench_point_search(table, schema, rows / 2) != SQL_OK) ||
+        ((bench_case == BENCH_ALL || bench_case == BENCH_ID_RANGE) &&
+         bench_id_range_search(table, schema, 2,
+                               "\uBC94\uC704 \uC870\uD68C(id)",
+                               rows / 4, rows / 2) != SQL_OK) ||
+        ((bench_case == BENCH_ALL || bench_case == BENCH_ID_RANGE_LARGE) &&
+         bench_id_range_search(table, schema, 3,
+                               "\uB300\uBC94\uC704 \uC870\uD68C(id)",
+                               1, large_range_to) != SQL_OK) ||
+        ((bench_case == BENCH_ALL || bench_case == BENCH_AGE_RANGE) &&
+         bench_age_range_search(table, schema, 30, 40) != SQL_OK) ||
+        ((bench_case == BENCH_ALL || bench_case == BENCH_HEIGHT) &&
+         bench_height_comparison(table, schema, rows / 2) != SQL_OK)) {
+        fprintf(stderr, "\uBCA4\uCE58\uB9C8\uD06C \uC2E4\uD589\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4.\n");
         index_cleanup();
         schema_free(schema);
         return 1;
     }
 
     printf("\n============================================================\n");
-    printf("  Done.\n");
+    printf("  \uC644\uB8CC\n");
     printf("============================================================\n");
 
     index_cleanup();
