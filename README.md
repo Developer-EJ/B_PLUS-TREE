@@ -1,138 +1,301 @@
 # SQL Parser with B+ Tree Index
 
-간단한 SQL 처리기에 B+ 트리 인덱스를 추가해 대용량 데이터에서의 SELECT/INSERT 성능을 비교한다.
+이전 차수의 파일 기반 SQL 처리기에 B+ 트리 인덱스, `BETWEEN` 범위 질의, 성능 비교 하네스를 통합한 프로젝트입니다.
 
 ---
 
-## 팀 구성 및 담당
+## 프로젝트를 한 문장으로 소개하면
 
-| 역할 | 담당자 | 소유 파일 | 문서 |
-|------|--------|----------|------|
-| A — B+ Tree 알고리즘 | 김용 | `include/bptree.h`, `src/bptree/bptree.c` | [docs/role_A_김용.md](docs/role_A_김용.md) |
-| B — 인덱스 매니저 | 김은재 | `include/index_manager.h`, `src/index/index_manager.c` | [docs/role_B_김은재.md](docs/role_B_김은재.md) |
-| C — SQL 파서 확장 | 김규민 | `src/input/lexer.c`, `src/parser/parser.c`, `src/schema/schema.c` | [docs/role_C_김규민.md](docs/role_C_김규민.md) |
-| D — Executor + 성능 | 김원우 | `src/executor/executor.c`, `src/main.c` | [docs/role_D_김원우.md](docs/role_D_김원우.md) |
-
-**공유 파일 (수정 시 전원 합의 필요)**: `include/interface.h`, `Makefile`
+기존 SQL 처리기의 실행 흐름은 유지하면서, `id` / `age` 조건에 대해 B+ 트리 인덱스를 연결해 선형 탐색과 실제 성능 차이를 비교하는 확장형 DB 실험 프로젝트입니다.
 
 ---
 
-## 아키텍처
+## 발표에서 먼저 잡고 가면 좋은 핵심 메시지
 
-```
-SQL 파일
-   │
-   ▼
-[Lexer] ──────── TOKEN_BETWEEN / TOKEN_AND 추가 (C: 김규민)
-   │
-   ▼
-[Parser] ─────── WHERE col BETWEEN a AND b 지원 (C: 김규민)
-   │
-   ▼
-[Schema] ─────── BETWEEN 컬럼 타입 검증 (C: 김규민)
-   │
-   ├──[INSERT]──▶ db_insert ──▶ 파일 append + B+ Tree 등록 (D: 김원우)
-   │                                    │
-   │                              [Index Manager] (B: 김은재)
-   │                                    │
-   │                             [B+ Tree #1: id]      (A: 김용)
-   │                             [B+ Tree #2: id,age]  (A: 김용)
-   │
-   └──[SELECT]──▶ db_select ──▶ WHERE id=?              → Tree #1 point search
-                                WHERE id BETWEEN a AND b → Tree #1 range search
-                                WHERE name=? 등          → 선형 스캔 (비교군)
-                                각 경로 실행 시간 + 트리 높이 출력 (D: 김원우)
-```
+- 이 프로젝트는 "새로운 DB를 처음부터 다시 만든 것"이 아니라, 이전 차수 SQL 처리기에 인덱스 계층을 자연스럽게 붙인 확장판입니다.
+- 인덱스 탐색 자체는 거의 항상 빠르지만, 최종 실행 시간은 "얼마나 많은 row를 다시 읽어 와야 하는가"에 따라 달라집니다.
+- 그래서 `B+ 트리 탐색 시간`과 `최종 SELECT 실행 시간`을 분리해서 설명하는 것이 발표의 핵심입니다.
 
 ---
 
-## 빌드
+## 1. B+ 트리 탐색 과정 및 특징
 
-```bash
-make          # 기본 빌드 → ./sqlp
-make sim      # 디스크 I/O 시뮬레이션 빌드 → ./sqlp_sim
-make perf     # 성능 비교 실행 파일 → ./test_perf
-make perf_sim # 성능 비교 + I/O 시뮬레이션 → ./test_perf_sim
-make gen_data # 데이터 생성기 → ./gen_data
-make test     # 단위 테스트 실행
-make clean    # 빌드 결과물 삭제
-```
+### 1-1. 하나를 찾는 과정
 
----
+선형 탐색은 `data/{table}.dat` 파일을 처음부터 끝까지 읽으면서 목표 row를 찾습니다.
 
-## 실행
+- row 수가 커질수록 비교 횟수가 함께 늘어납니다.
+- 원하는 값이 뒤쪽에 있으면 거의 끝까지 읽어야 합니다.
+- 데이터 파일 자체를 훑기 때문에 결과적으로 파일 전체 탐색과 비슷한 비용이 듭니다.
 
-```bash
-# SQL 파일 실행
-./sqlp samples/insert.sql
+반면 B+ 트리는 루트부터 시작해서 내부 노드의 separator key를 따라 한 경로만 내려갑니다.
 
-# 대용량 데이터 생성 (100만 건)
-./gen_data 1000000 users
-./sqlp samples/bench_users.sql   # 삽입 실행
+- `root -> internal -> leaf` 경로만 따라갑니다.
+- 내부 노드에서는 "어느 child로 내려갈지"만 판단합니다.
+- 실제 값은 leaf에서 찾습니다.
+- 트리 높이가 낮으면 비교 횟수가 매우 적습니다.
 
-# 성능 비교
-./test_perf
-./test_perf_sim   # I/O 시뮬레이션 포함
-```
+이 프로젝트 구현 기준으로는:
 
----
+- 내부 노드: `internal_child_index()` 가 separator key를 보고 다음 child 위치를 정합니다.
+- 리프 노드: `leaf_lower_bound()` 가 현재 leaf 안에서 시작 위치 `pos`를 찾습니다.
+- point search: `find_leaf(key)` 후 해당 위치의 offset 하나를 바로 반환합니다.
 
-## 지원 SQL 문법
+### 1-2. 왜 node 안에서는 array 탐색이 유리한가
 
-```sql
-INSERT INTO users VALUES (1, 'alice', 25, 'alice@example.com');
-INSERT INTO users (id, name, age, email) VALUES (2, 'bob', 30, 'bob@example.com');
+B+ 트리는 트리 구조이지만, 각 노드 내부는 정렬된 배열입니다.
 
-SELECT * FROM users;
-SELECT * FROM users WHERE id = 42;
-SELECT * FROM users WHERE name = 'alice';
-SELECT * FROM users WHERE id BETWEEN 100 AND 200;
-```
+- 한 `BPNode` 안의 key들은 `keys[]` 배열에 정렬되어 저장됩니다.
+- leaf는 `values[]`, internal은 `children[]` 배열을 같은 인덱스 기준으로 사용합니다.
+- 노드 하나 안에서 보는 원소 수는 `order`에 의해 제한되므로, 전체 파일을 훑는 것보다 훨씬 작습니다.
+- 메모리상에서 연속된 배열을 읽기 때문에 캐시 친화적이고, 비교 범위도 작습니다.
 
----
+즉 "전체 데이터 파일을 배열처럼 끝까지 보는 것"은 비효율적이지만, "정렬된 작은 node 내부 배열을 보는 것"은 매우 효율적입니다.
 
-## 스키마 (`schema/users.schema`)
+### 이미지 영역 A — 선형 탐색 vs B+ 트리 단일 탐색
 
-```
-col0=id,INT,0         ← B+ Tree #1 인덱스 키
-col1=name,VARCHAR,64
-col2=age,INT,0        ← B+ Tree #2 복합 키 (id, age)
-col3=email,VARCHAR,128
-```
+> 여기에 "하나의 key를 찾는 과정" 이미지를 넣기
+>
+> 추천 구성:
+> 왼쪽은 `data/users.dat` 를 1행부터 끝까지 읽는 선형 탐색,
+> 오른쪽은 `Root -> Internal -> Leaf` 한 경로만 내려가는 B+ 트리 탐색
+>
+> 강조 포인트:
+> `전체 row 수에 비례` vs `트리 높이에 비례`
 
----
+### 이미지 영역 B — B+ 트리 탐색 과정이 좋은 이유
 
-## 성능 출력 예시
+> 여기에 "왜 B+ 트리가 유리한가" 이미지를 넣기
+>
+> 추천 구성:
+> `정렬된 node 내부 array`, `낮은 높이`, `leaf linked list`, `범위 질의의 연속성`
+>
+> 강조 포인트:
+> "한 번 leaf까지 내려간 뒤에는 range scan이 옆 leaf로 자연스럽게 이어진다"
 
-```
-[SELECT][index:id:eq         ]    0.012 ms  tree_h(id)=4  tree_h(comp)=4
-[SELECT][index:id:range      ]    0.087 ms  tree_h(id)=4  tree_h(comp)=4
-[SELECT][linear              ]  342.110 ms  tree_h(id)=4  tree_h(comp)=4
-```
+### 발표에서 이렇게 연결하면 자연스럽다
 
-`make sim` 으로 빌드하면 레벨 이동마다 200µs sleep 이 추가되어 높이별 시간 차이가 명확해진다.
+- 선형 탐색은 전체 파일을 보는 방식입니다.
+- B+ 트리는 파일 전체가 아니라 "트리 경로 + 필요한 leaf"만 봅니다.
+- 그리고 leaf 내부는 이미 정렬된 배열이라, node 안의 탐색 비용이 작습니다.
+- 그래서 대용량 데이터일수록 point search에서 차이가 잘 드러납니다.
 
 ---
 
-## 파일 구조
+## 2. B+ 조건 BETWEEN 로직 설명
 
-```
-.
-├── include/
-│   ├── interface.h           ← 공유 계약 (전원 합의 필요)
-│   ├── bptree.h              ← A (김용)
-│   └── index_manager.h      ← B (김은재)
-├── src/
-│   ├── main.c                ← D (김원우)
-│   ├── bptree/bptree.c       ← A (김용)
-│   ├── index/index_manager.c ← B (김은재)
-│   ├── input/{input,lexer}.c ← C (김규민)
-│   ├── parser/parser.c       ← C (김규민)
-│   ├── schema/schema.c       ← C (김규민)
-│   └── executor/executor.c   ← D (김원우)
-├── tests/                    ← 공통 (공동 작업)
-├── tools/gen_data.c          ← 공통
-├── schema/users.schema
-├── docs/role_{A,B,C,D}_*.md
-└── Makefile
-```
+`BETWEEN` 질의는 "시작 leaf를 찾고, 그 leaf부터 오른쪽으로 필요한 범위만 훑는 방식"으로 동작합니다.
+
+이 프로젝트 기준 흐름은 다음과 같습니다.
+
+1. executor가 `WHERE id BETWEEN a AND b` 또는 `WHERE age BETWEEN a AND b` 를 인식합니다.
+2. `index_range_id_alloc()` 또는 `index_range_age_alloc()` 이 호출됩니다.
+3. B+ 트리에서는 `find_leaf(from)` 으로 시작 leaf를 찾습니다.
+4. 첫 leaf 안에서 `leaf_lower_bound(from)` 으로 시작 위치 `pos`를 정합니다.
+5. 현재 leaf의 key들을 `pos`부터 보면서 조건에 맞는 offset을 모읍니다.
+6. leaf를 다 보면 `leaf->next` 로 옆 leaf로 이동합니다.
+7. `key > to` 가 되는 순간 더 오른쪽은 볼 필요가 없으므로 즉시 종료합니다.
+8. 마지막으로 executor가 offset 배열을 받아 `fseek + fgets` 로 실제 row를 다시 읽어 옵니다.
+
+여기서 중요한 점은 두 단계가 분리된다는 것입니다.
+
+- B+ 트리 단계: "어떤 row를 읽어야 하는지" offset을 빠르게 찾음
+- executor 단계: "그 row를 실제로 다시 읽음"
+
+그래서 발표에서는 아래 메시지가 중요합니다.
+
+- 인덱스 탐색 자체는 빠르다.
+- 하지만 결과 row가 많아지면 `fetch_by_offsets()` 에서 실제 파일 재접근이 많이 발생한다.
+- 즉, `BETWEEN` 성능은 "트리 탐색"과 "row fetch I/O"를 나눠서 봐야 한다.
+
+### 왜 BETWEEN에서 array 탐색이 특히 잘 맞는가
+
+이 구현에서 leaf 내부는 정렬된 배열이고, leaf들끼리는 linked list로 이어져 있습니다.
+
+- 시작 leaf 안에서는 `lower_bound`로 바로 시작 위치를 찾습니다.
+- 그 뒤에는 같은 leaf 안에서 연속된 key를 순서대로 읽습니다.
+- 범위가 leaf를 넘어가면 `leaf->next` 만 따라가면 됩니다.
+
+즉 `BETWEEN`은 "트리 전체를 매번 다시 찾는" 것이 아니라:
+
+- 처음 한 번만 트리 경로를 타고 내려가고
+- 이후에는 정렬된 array + linked leaf를 이용해 순차적으로 훑는 구조입니다.
+
+그래서 범위가 작을 때는 매우 효율적이고, 범위가 커질수록 그 다음 단계인 실제 row 재조회 비용이 더 중요해집니다.
+
+### BETWEEN 흐름 이미지
+
+![BETWEEN range flow](docs/between_range_flow_visual.svg)
+
+### 발표용 한 줄 정리
+
+`BETWEEN`은 "from이 시작되는 leaf까지는 트리 탐색", 그 이후는 "정렬된 leaf 배열과 leaf linked list를 이용한 순차 탐색"이라고 설명하면 가장 자연스럽습니다.
+
+---
+
+## 3. 시연 전에 설명해 두면 좋은 실험 해석
+
+시연 자체는 발표에서 직접 보여주고, README에서는 "왜 이런 결과가 나오는지"를 먼저 정리해 두는 편이 좋습니다.
+
+### 3-1. `WHERE id = N`
+
+- 선형 탐색은 파일을 앞에서부터 읽어 가며 비교합니다.
+- 인덱스 기반 탐색은 트리에서 offset을 찾고 그 row만 바로 읽습니다.
+- 따라서 point search에서는 보통 인덱스 기반 탐색이 뚜렷하게 빠릅니다.
+
+### 3-2. `WHERE id BETWEEN 2500 AND 5000`
+
+- 가져오는 범위가 비교적 작으면 인덱스가 유리합니다.
+- 필요한 offset만 모아서 row를 다시 읽으면 되기 때문입니다.
+- 즉 "범위 탐색 + 결과 row 수"가 둘 다 작을 때 인덱스 경로의 장점이 큽니다.
+
+### 3-3. `WHERE age BETWEEN 30 AND 50`
+
+- `age`는 중복이 많고, 선택되는 row 수도 많아질 수 있습니다.
+- 이 경우 트리에서 offset을 찾는 일 자체는 여전히 빠릅니다.
+- 하지만 offset마다 실제 row를 다시 읽는 비용이 커지면, 오히려 full scan이 더 유리해질 수 있습니다.
+
+여기서 발표 포인트는 명확합니다.
+
+- "인덱스 탐색"은 계속 빠르다.
+- 그러나 "최종 실행"은 결과 row 수가 많을수록 디스크 I/O 영향이 커진다.
+- 그래서 high selectivity query에서는 full scan이 더 나은 경우가 생긴다.
+
+### 3-4. 높이에 따른 B+ 트리 탐색 시간 비교
+
+- 메모리에서만 연산하면 높이 차이가 있어도 성능 차이가 아주 크게 나지 않을 수 있습니다.
+- 그래서 이 프로젝트는 실제 환경과 비슷한 설명을 위해 "랜덤 블록 읽기"에 해당하는 I/O 시뮬레이션 로직을 추가했습니다.
+- 발표에서는 "메모리상 트리"와 "디스크 페이지 접근이 있는 트리"를 구분해 설명하면 설득력이 높아집니다.
+
+---
+
+## 4. 이 프로젝트가 발표에서 재미있는 이유
+
+### 쟁점 포인트 1 — 인덱스가 항상 최종 결과까지 빠른 것은 아니다
+
+- raw B+ 트리 탐색은 매우 빠릅니다.
+- 하지만 결과 row가 많아지면 `offset -> row 재조회` 비용이 커집니다.
+- 그래서 `age BETWEEN 30 AND 50` 같은 질의에서는 full scan이 더 효율적인 구간이 나타날 수 있습니다.
+
+### 쟁점 포인트 2 — 이전 SQL 처리기와의 매끄러운 연결
+
+- `Lexer -> Parser -> Schema -> Executor` 흐름은 그대로 유지했습니다.
+- parser에는 `BETWEEN`만 최소 확장했습니다.
+- executor에만 인덱스 분기를 넣어 기존 linear path를 비교군으로 남겼습니다.
+
+즉 "기존 시스템을 버리지 않고 확장했다"는 점이 발표에서 좋은 메시지입니다.
+
+### 쟁점 포인트 3 — 높이 비교를 위해 I/O 시뮬레이션을 추가했다
+
+- 메모리에서만 보면 트리 높이 차이가 체감되기 어렵습니다.
+- 그래서 노드 방문 시 랜덤 블록 읽기처럼 동작하는 시뮬레이션을 추가했습니다.
+- 이 덕분에 "왜 실제 DB에서 tree height가 중요한가"를 더 현실적으로 설명할 수 있습니다.
+
+### 추가로 잡아두면 좋은 포인트
+
+- `Tree #2`가 복합 키에서 `age` 단일 인덱스로 재설계되면서 range query 설명이 훨씬 자연스러워졌습니다.
+- `age` 트리는 중복 key를 허용하므로, point search보다 range query 실험에 더 적합합니다.
+- 선형 탐색 경로를 일부러 남겨 두었기 때문에, 단순 구현이 아니라 "비교 가능한 시스템"이 되었습니다.
+
+---
+
+## 5. 역할 분담을 발표에 녹이는 방법
+
+각 역할이 독립 모듈을 맡되, 최종적으로는 하나의 SELECT 경로에서 만난다는 점을 강조하면 좋습니다.
+
+| 역할 | 담당 | 발표에서 강조할 포인트 |
+|------|------|------------------------|
+| A | B+ Tree 알고리즘 | split, leaf linked list, range scan, tree height |
+| B | Index Manager | `.dat` 파일 스캔, `id/age -> offset` 인덱스 구축 |
+| C | SQL 파서 확장 | `BETWEEN` 문법과 타입 검증 추가 |
+| D | Executor + 성능 | 인덱스 분기, `fetch_by_offset(s)`, 시간 측정과 비교 |
+
+발표 멘트로는 이렇게 정리하기 좋습니다.
+
+- C가 `BETWEEN` 문법을 해석합니다.
+- D가 어떤 실행 경로를 탈지 결정합니다.
+- B가 인덱스 API로 연결합니다.
+- A의 B+ 트리가 실제 탐색을 수행합니다.
+- 다시 D가 offset으로 row를 읽어 최종 결과를 만듭니다.
+
+즉, 각 역할은 분리되어 있지만 실제 실행에서는 하나의 파이프라인으로 결합됩니다.
+
+---
+
+## 6. 커밋 이력으로 본 프로젝트 진화
+
+커밋 흐름을 보면 발표에서 설명하기 좋은 개발 서사가 보입니다.
+
+### 6-1. 기본 구조와 협업 규칙 정리
+
+- `203619e`: 프로젝트 초기화
+- `5181916`: 인터페이스와 역할 문서 생성
+- `c7d50d5`: 하네스, pre-commit hook, ownership guard, `AGENT.md` 추가
+
+즉, 초반부터 "기능 구현"뿐 아니라 "협업 가능한 구조"를 먼저 만든 프로젝트였습니다.
+
+### 6-2. range query에 맞게 인덱스 구조 재설계
+
+- `a59cdcc`: Tree #2를 복합 키에서 `age` 단일 인덱스로 재설계
+- `ec956f8`: executor에 `WHERE age BETWEEN` 인덱스 분기 추가
+
+이 부분은 발표에서 "요구사항에 맞춰 구조를 바꾼 설계 판단" 사례로 쓰기 좋습니다.
+
+### 6-3. 파서와 B+ 트리 본체 구현
+
+- `aa1cf11`, `2645f9b`: Role C `BETWEEN` 기능 구현
+- `f60c9ab`: Role A B+ 트리 구현
+- `a0f5e69`: 기존 `.dat` 파일을 읽어 인덱스를 재구축하는 `index_init` 구현
+
+즉, 문법 확장과 인덱스 구현이 병렬로 진행된 뒤 하나로 묶였습니다.
+
+### 6-4. 실행 안정화와 성능 비교 체계 추가
+
+- `2eb6a76`: executor 안정성 보강 및 회귀 테스트
+- `a97f0b3`: 성능 비교 벤치마크 추가, 선형 조회의 `BETWEEN` 처리 지원
+- `82777a5`: CLI 비교 실행과 B+ 트리 range 조회 확장
+
+이 흐름 덕분에 발표에서 "기능 구현"에서 끝나지 않고 "비교 가능한 실험 환경"까지 만들었다는 점을 보여줄 수 있습니다.
+
+### 6-5. 문서화와 발표 준비 단계까지 이어짐
+
+- `d09c9fc`, `3b269e1`, `fa2125c`: 실행 흐름과 B+ 트리 설명 보강
+- `2379b2e`, `74ea0a2`: 이전 SQL 처리기와 현재 프로젝트의 연속성 정리
+
+즉, 최종 단계에서는 코드뿐 아니라 "어떻게 설명할 것인가"까지 정리하는 흐름으로 마무리되었습니다.
+
+---
+
+## 7. 이전 SQL 처리기와 어떻게 이어졌는가
+
+이 프로젝트의 큰 장점은 기존 파이프라인을 거의 그대로 살렸다는 점입니다.
+
+기존 흐름:
+
+`CLI Input -> Lexer -> Parser -> Schema -> Executor`
+
+현재 흐름:
+
+`CLI Input -> Lexer -> Parser -> Schema -> Executor -> Index Manager -> B+ Tree`
+
+즉, 인덱스는 기존 SQL 처리기를 대체한 것이 아니라, executor 뒤쪽 실행 경로를 확장한 것입니다.
+
+발표에서는 다음 식으로 말하면 좋습니다.
+
+- "기존 SQL 엔진은 유지했습니다."
+- "가능한 조건에서만 인덱스를 태웠습니다."
+- "나머지는 선형 탐색으로 남겨서 비교군을 만들었습니다."
+
+이 메시지가 이 프로젝트의 정체성을 가장 잘 설명합니다.
+
+---
+
+## 8. 발표 마무리 멘트로 쓰기 좋은 요약
+
+- 작은 범위의 point search / range search에서는 B+ 트리가 매우 효과적입니다.
+- 하지만 결과 row가 많아지면 실제 row fetch I/O 때문에 full scan이 더 유리해질 수 있습니다.
+- 이 프로젝트는 바로 그 차이를 "SQL 처리기 + 인덱스 + 비교 하네스"를 통해 보여주기 위해 설계되었습니다.
+
+한 줄로 정리하면:
+
+> "이 프로젝트는 B+ 트리가 빠르다는 사실만 보여주는 것이 아니라, 언제 빠르고 언제 전체 실행에서는 불리해질 수 있는지까지 보여주는 SQL 처리기 확장 실험입니다."
