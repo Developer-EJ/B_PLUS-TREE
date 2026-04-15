@@ -10,12 +10,29 @@
 
 #define BENCH_RUNS 3
 
+/*
+ * test_perf.c
+ *
+ * This benchmark intentionally measures the same logical query at two layers:
+ *
+ * 1. Raw layer:
+ *    compare index APIs against a hand-written linear file scan
+ *
+ * 2. Executor layer:
+ *    compare the real db_select() index path against forced linear execution
+ *
+ * That split is useful because it tells us whether the cost comes from:
+ * - the tree lookup itself
+ * - or the later row-fetch / ResultSet-building work inside the executor
+ */
+
 typedef enum {
     TREE_NONE = -1,
     TREE_ID = 0,
     TREE_AGE = 1
 } TreeKind;
 
+/* One benchmark result row shown in the final report. */
 typedef struct {
     double avg_ms;
     int    rows;
@@ -27,6 +44,7 @@ static double now_ms(void) {
     return (double)clock() * 1000.0 / (double)CLOCKS_PER_SEC;
 }
 
+/* Tiny safe copy helper used when initializing synthetic SelectStmt values. */
 static void copy_text(char *dst, size_t size, const char *src) {
     if (!dst || size == 0) return;
     if (!src) src = "";
@@ -35,10 +53,12 @@ static void copy_text(char *dst, size_t size, const char *src) {
     dst[size - 1] = '\0';
 }
 
+/* Build data/{table}.dat. */
 static void build_data_path(char *buf, size_t size, const char *table) {
     snprintf(buf, size, "data/%s.dat", table);
 }
 
+/* Benchmark setup expects the data file to already exist. */
 static int data_file_exists(const char *table) {
     char path[256];
     build_data_path(path, sizeof(path), table);
@@ -49,6 +69,7 @@ static int data_file_exists(const char *table) {
     return 1;
 }
 
+/* Find a schema column index by name. */
 static int find_column_index(const TableSchema *schema, const char *name) {
     if (!schema || !name) return -1;
 
@@ -59,6 +80,10 @@ static int find_column_index(const TableSchema *schema, const char *name) {
     return -1;
 }
 
+/*
+ * Extract one column value from a serialized row line without building a full
+ * Row/ResultSet object. The raw linear benchmark uses this to stay lightweight.
+ */
 static int extract_column_value(const char *line, int col_idx,
                                 char *buf, size_t buf_size) {
     if (!line || !buf || buf_size == 0 || col_idx < 0) return 0;
@@ -81,6 +106,7 @@ static int extract_column_value(const char *line, int col_idx,
     return 1;
 }
 
+/* Predicate evaluator for the raw linear benchmark path. */
 static int raw_line_matches(const char *line, const SelectStmt *stmt,
                             const TableSchema *schema) {
     if (!stmt->has_where) return 1;
@@ -106,6 +132,7 @@ static int raw_line_matches(const char *line, const SelectStmt *stmt,
     return 1;
 }
 
+/* Reuse schema validation instead of duplicating query-shape rules here. */
 static int validate_select_stmt(const SelectStmt *stmt,
                                 const TableSchema *schema) {
     ASTNode node;
@@ -115,6 +142,7 @@ static int validate_select_stmt(const SelectStmt *stmt,
     return schema_validate(&node, schema);
 }
 
+/* Build a simple SELECT * ... WHERE col = value statement in memory. */
 static void init_select_eq(SelectStmt *stmt, const char *table,
                            const char *col, const char *value) {
     memset(stmt, 0, sizeof(*stmt));
@@ -126,6 +154,7 @@ static void init_select_eq(SelectStmt *stmt, const char *table,
     copy_text(stmt->where.val, sizeof(stmt->where.val), value);
 }
 
+/* Build a simple SELECT * ... WHERE col BETWEEN from AND to statement. */
 static void init_select_between(SelectStmt *stmt, const char *table,
                                 const char *col,
                                 const char *from, const char *to) {
@@ -139,12 +168,14 @@ static void init_select_between(SelectStmt *stmt, const char *table,
     copy_text(stmt->where.val_to, sizeof(stmt->where.val_to), to);
 }
 
+/* Map benchmark labels to the right tree height query. */
 static int tree_height(const char *table, TreeKind kind) {
     if (kind == TREE_ID) return index_height_id(table);
     if (kind == TREE_AGE) return index_height_age(table);
     return -1;
 }
 
+/* Pretty-print one benchmark result row. */
 static void print_result_row(const char *label, const BenchResult *result) {
     char tree_buf[32];
 
@@ -157,6 +188,10 @@ static void print_result_row(const char *label, const BenchResult *result) {
            label, result->avg_ms, result->rows, tree_buf, result->tree_io);
 }
 
+/*
+ * Print a ratio only when both paths returned the same number of rows.
+ * If the row counts differ, the mismatch itself is the important signal.
+ */
 static void print_speedup_or_mismatch(const char *label,
                                       const BenchResult *index_result,
                                       const BenchResult *linear_result) {
@@ -181,6 +216,13 @@ static void print_separator(void) {
            "--------------------");
 }
 
+/*
+ * Raw linear baseline:
+ * scan the data file directly and count matching rows.
+ *
+ * This deliberately does not build a ResultSet because the goal here is to
+ * compare raw lookup/filter work against raw index lookup work.
+ */
 static int raw_scan_count(const char *table, const SelectStmt *stmt,
                           const TableSchema *schema, int *rows_out) {
     char path[256];
@@ -201,6 +243,7 @@ static int raw_scan_count(const char *table, const SelectStmt *stmt,
     return SQL_OK;
 }
 
+/* Measure the raw full-scan baseline. */
 static int measure_raw_linear(const char *table, const SelectStmt *stmt,
                               const TableSchema *schema, BenchResult *out) {
     double total = 0.0;
@@ -220,6 +263,7 @@ static int measure_raw_linear(const char *table, const SelectStmt *stmt,
     return SQL_OK;
 }
 
+/* Measure only the raw id point lookup cost through the index API. */
 static int measure_raw_id_point(const char *table, int target_id,
                                 BenchResult *out) {
     double total = 0.0;
@@ -239,6 +283,7 @@ static int measure_raw_id_point(const char *table, int target_id,
     return SQL_OK;
 }
 
+/* Measure only the raw id range lookup cost through the index API. */
 static int measure_raw_id_range(const char *table, int from, int to,
                                 BenchResult *out) {
     double total = 0.0;
@@ -261,6 +306,7 @@ static int measure_raw_id_range(const char *table, int from, int to,
     return SQL_OK;
 }
 
+/* Measure only the raw age range lookup cost through the index API. */
 static int measure_raw_age_range(const char *table, int from, int to,
                                  BenchResult *out) {
     double total = 0.0;
@@ -283,6 +329,15 @@ static int measure_raw_age_range(const char *table, int from, int to,
     return SQL_OK;
 }
 
+/*
+ * Measure the full executor path:
+ * - path selection
+ * - offset fetches
+ * - row parsing
+ * - ResultSet creation
+ *
+ * This is what users actually feel when they run sqlp.
+ */
 static int measure_executor_select(const SelectStmt *stmt,
                                    const TableSchema *schema,
                                    int force_linear, TreeKind kind,
@@ -311,6 +366,7 @@ static int measure_executor_select(const SelectStmt *stmt,
     return SQL_OK;
 }
 
+/* Test 1: point lookup on id. */
 static int bench_point_search(const char *table, const TableSchema *schema,
                               int target_id) {
     char id_buf[32];
@@ -343,6 +399,7 @@ static int bench_point_search(const char *table, const TableSchema *schema,
     return SQL_OK;
 }
 
+/* Test 2: id range lookup. */
 static int bench_id_range_search(const char *table, const TableSchema *schema,
                                  int from, int to) {
     char from_buf[32];
@@ -378,6 +435,7 @@ static int bench_id_range_search(const char *table, const TableSchema *schema,
     return SQL_OK;
 }
 
+/* Test 3: age range lookup. This is where large-result secondary-index costs show up. */
 static int bench_age_range_search(const char *table, const TableSchema *schema,
                                   int from, int to) {
     char from_buf[32];
@@ -413,11 +471,19 @@ static int bench_age_range_search(const char *table, const TableSchema *schema,
     return SQL_OK;
 }
 
+/* Rebuild both trees with the same order for the height comparison test. */
 static int init_index_for_order(const char *table, int order) {
     index_cleanup();
     return index_init(table, order, order);
 }
 
+/*
+ * Test 4: compare a very small order against the default order.
+ *
+ * The point of this test is not "realistic production tuning". It is a way to
+ * exaggerate the tree height difference so we can observe how extra node visits
+ * change time and tree_io.
+ */
 static int bench_height_comparison(const char *table, const TableSchema *schema,
                                    int target_id) {
     char id_buf[32];
@@ -460,6 +526,7 @@ int main(int argc, char *argv[]) {
     int rows = (argc > 2) ? atoi(argv[2]) : 1000000;
     TableSchema *schema = NULL;
 
+    /* The CLI accepts a table name and the expected row count used in labels. */
     printf("============================================================\n");
     printf("  B+ Tree Performance Benchmark\n");
     printf("  Table: %s  |  Rows: %d\n", table, rows);
@@ -476,6 +543,10 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    /*
+     * test_perf does not auto-load data on purpose.
+     * We want the benchmark step to measure queries only, not data preparation.
+     */
     if (!data_file_exists(table)) {
         fprintf(stderr, "benchmark data missing for '%s'.\n", table);
         fprintf(stderr, "Run ./sqlp samples/bench_%s.sql first.\n", table);
@@ -495,6 +566,7 @@ int main(int argc, char *argv[]) {
     printf("  tree_h(id)=%d  tree_h(age)=%d\n",
            index_height_id(table), index_height_age(table));
 
+    /* The four sections below form the full first-stage benchmark report. */
     if (bench_point_search(table, schema, rows / 2) != SQL_OK ||
         bench_id_range_search(table, schema, rows / 4, rows / 2) != SQL_OK ||
         bench_age_range_search(table, schema, 30, 40) != SQL_OK ||

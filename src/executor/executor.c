@@ -15,10 +15,32 @@
 #include "../../include/index_manager.h"
 #include "executor_internal.h"
 
+/*
+ * executor.c
+ *
+ * This module sits between the parsed SQL AST and the on-disk table files.
+ *
+ * Main responsibilities:
+ * 1. INSERT:
+ *    - append one row to data/{table}.dat
+ *    - remember the file offset
+ *    - update id/age indexes with that offset
+ *
+ * 2. SELECT:
+ *    - decide whether the query can use an index path
+ *    - fetch rows by file offset when an index path is chosen
+ *    - fall back to a linear scan for everything else
+ *
+ * The executor intentionally keeps stdout/stderr separated:
+ * - stdout: query result table
+ * - stderr: timing / diagnostic logs
+ */
+
 static double now_ms(void) {
     return (double)clock() * 1000.0 / (double)CLOCKS_PER_SEC;
 }
 
+/* Small local replacement for strdup to stay within plain C99. */
 static char *dup_string(const char *src) {
     if (!src) src = "";
 
@@ -30,6 +52,7 @@ static char *dup_string(const char *src) {
     return copy;
 }
 
+/* Safe fixed-size string copy helper used across executor code paths. */
 static void copy_text(char *dst, size_t size, const char *src) {
     if (!dst || size == 0) return;
     if (!src) src = "";
@@ -38,6 +61,7 @@ static void copy_text(char *dst, size_t size, const char *src) {
     dst[size - 1] = '\0';
 }
 
+/* Find the schema index for a column name such as "id" or "age". */
 static int find_column_index(const TableSchema *schema, const char *name) {
     if (!schema || !name) return -1;
 
@@ -49,6 +73,13 @@ static int find_column_index(const TableSchema *schema, const char *name) {
     return -1;
 }
 
+/*
+ * Extract one column value from a serialized row line:
+ *   "1 | alice | 25 | alice@example.com"
+ *
+ * The executor uses this helper in linear scan mode, where it must inspect
+ * plain file rows without help from the B+Tree.
+ */
 static int line_column_value(const char *line, int col_idx,
                              char *buf, size_t buf_size) {
     if (!line || !buf || buf_size == 0 || col_idx < 0) return 0;
@@ -73,6 +104,7 @@ static int line_column_value(const char *line, int col_idx,
     return 1;
 }
 
+/* Build an empty ResultSet that still preserves output column metadata. */
 static ResultSet *make_empty_rs(const TableSchema *schema) {
     ResultSet *rs = (ResultSet *)calloc(1, sizeof(ResultSet));
     if (!rs) return NULL;
@@ -90,6 +122,15 @@ static ResultSet *make_empty_rs(const TableSchema *schema) {
     return rs;
 }
 
+/*
+ * Equality-only matcher used by the linear path.
+ *
+ * Example:
+ *   SELECT * FROM users WHERE name = 'alice'
+ *
+ * The indexed path handles only the supported id/age patterns, so every other
+ * predicate eventually comes through this helper.
+ */
 static int line_matches_where(const char *line, const SelectStmt *stmt,
                               const TableSchema *schema) {
     if (!stmt->has_where) return 1;
@@ -116,6 +157,14 @@ static int line_matches_where(const char *line, const SelectStmt *stmt,
     return (tok && strcmp(tok, stmt->where.val) == 0) ? 1 : 0;
 }
 
+/*
+ * Unified filter entry point for the linear scan.
+ *
+ * This extends the old equality-only behavior so forced-linear execution can
+ * also support:
+ *   WHERE id BETWEEN ...
+ *   WHERE age BETWEEN ...
+ */
 static int line_matches_filter(const char *line, const SelectStmt *stmt,
                                const TableSchema *schema) {
     if (!stmt->has_where) return 1;
@@ -139,6 +188,7 @@ static int line_matches_filter(const char *line, const SelectStmt *stmt,
     return 1;
 }
 
+/* Parse one serialized data line into a Row structure. */
 static Row parse_line_to_row(const char *line, const TableSchema *schema) {
     Row row = {0};
     row.count = schema->column_count;
@@ -165,6 +215,14 @@ static Row parse_line_to_row(const char *line, const TableSchema *schema) {
     return row;
 }
 
+/*
+ * Read every matching row from an already opened table file.
+ *
+ * This is the core of the linear fallback path:
+ * - iterate the file top-to-bottom
+ * - keep only rows that satisfy the WHERE clause
+ * - return them as parsed Row objects
+ */
 static int read_rows(FILE *fp, const SelectStmt *stmt,
                      const TableSchema *schema, Row **rows_out) {
     *rows_out = NULL;
@@ -199,6 +257,12 @@ static int read_rows(FILE *fp, const SelectStmt *stmt,
     return row_count;
 }
 
+/*
+ * Convert raw Row arrays into the public ResultSet shape.
+ *
+ * SELECT * keeps every schema column in order.
+ * SELECT a, b, c projects only the requested columns.
+ */
 static ResultSet *build_resultset(Row *rows, int row_count,
                                   const SelectStmt *stmt,
                                   const TableSchema *schema) {
@@ -282,6 +346,12 @@ static ResultSet *build_resultset(Row *rows, int row_count,
     return rs;
 }
 
+/*
+ * Random-read one row by file offset.
+ *
+ * This is used for point lookups such as WHERE id = 5000 after the id index
+ * tells us exactly where the row lives inside data/{table}.dat.
+ */
 static ResultSet *fetch_by_offset(long offset, const SelectStmt *stmt,
                                   const TableSchema *schema) {
     if (offset < 0) return make_empty_rs(schema);
@@ -321,6 +391,16 @@ static ResultSet *fetch_by_offset(long offset, const SelectStmt *stmt,
     return build_resultset(rows, 1, stmt, schema);
 }
 
+/*
+ * Random-read many rows by file offsets.
+ *
+ * Important nuance:
+ * - the B+Tree only finds offsets quickly
+ * - the executor still has to visit the table file again to fetch each row
+ *
+ * This is why a secondary-index range query can still be slower than a linear
+ * scan when the result set is large.
+ */
 static ResultSet *fetch_by_offsets(const long *offsets, int count,
                                    const SelectStmt *stmt,
                                    const TableSchema *schema) {
@@ -358,6 +438,7 @@ static ResultSet *fetch_by_offsets(const long *offsets, int count,
     return build_resultset(rows, actual, stmt, schema);
 }
 
+/* Full file scan fallback for non-indexed predicates or forced-linear mode. */
 static ResultSet *linear_scan(const SelectStmt *stmt,
                               const TableSchema *schema) {
     char path[256];
@@ -374,6 +455,7 @@ static ResultSet *linear_scan(const SelectStmt *stmt,
     return build_resultset(rows, row_count, stmt, schema);
 }
 
+/* Fill the optional report object used by compare mode and test_perf. */
 static void fill_exec_info(SelectExecInfo *info, const char *path,
                            double elapsed_ms, int tree_io, int row_count) {
     if (!info) return;
@@ -384,6 +466,21 @@ static void fill_exec_info(SelectExecInfo *info, const char *path,
     info->row_count = row_count;
 }
 
+/*
+ * Internal SELECT engine shared by:
+ * - normal CLI execution
+ * - --force-linear
+ * - --compare
+ * - performance benchmarks
+ *
+ * Path selection policy:
+ * - WHERE id = ?            -> index:id:eq
+ * - WHERE id BETWEEN ? AND ? -> index:id:range
+ * - WHERE age BETWEEN ? AND ? -> index:age:range
+ * - everything else          -> linear
+ *
+ * If force_linear is set, the function skips the index branches entirely.
+ */
 ResultSet *db_select_mode(const SelectStmt *stmt, const TableSchema *schema,
                           int force_linear, int emit_log,
                           SelectExecInfo *info) {
@@ -394,6 +491,7 @@ ResultSet *db_select_mode(const SelectStmt *stmt, const TableSchema *schema,
     int tree_io = 0;
     ResultSet *rs = NULL;
 
+    /* id predicates get the most direct point/range index paths. */
     if (!force_linear && stmt->has_where && strcmp(stmt->where.col, "id") == 0) {
         if (stmt->where.type == WHERE_EQ) {
             scan_type = "index:id:eq";
@@ -415,6 +513,7 @@ ResultSet *db_select_mode(const SelectStmt *stmt, const TableSchema *schema,
             rs = fetch_by_offsets(offsets, count, stmt, schema);
             free(offsets);
         }
+    /* age currently supports range lookup only. */
     } else if (!force_linear && stmt->has_where &&
                strcmp(stmt->where.col, "age") == 0 &&
                stmt->where.type == WHERE_BETWEEN) {
@@ -430,6 +529,13 @@ ResultSet *db_select_mode(const SelectStmt *stmt, const TableSchema *schema,
         free(offsets);
     }
 
+    /*
+     * Any unsupported predicate shape falls back here.
+     * That includes examples such as:
+     *   WHERE name = 'alice'
+     *   WHERE email = '...'
+     *   forced linear benchmarking / comparison runs
+     */
     if (!rs) {
         scan_type = "linear";
         tree_io = 0;
@@ -452,15 +558,28 @@ ResultSet *db_select_mode(const SelectStmt *stmt, const TableSchema *schema,
     return rs;
 }
 
+/* Public SELECT entry used by the normal executor contract. */
 ResultSet *db_select(const SelectStmt *stmt, const TableSchema *schema) {
     return db_select_mode(stmt, schema, 0, 1, NULL);
 }
 
+/* Quiet SELECT entry used only by benchmarks. */
 ResultSet *db_select_bench(const SelectStmt *stmt, const TableSchema *schema,
                            int force_linear) {
     return db_select_mode(stmt, schema, force_linear, 0, NULL);
 }
 
+/*
+ * INSERT one row into the table file and immediately index it.
+ *
+ * The critical ordering is:
+ * 1. open in binary append mode
+ * 2. capture ftell() before writing
+ * 3. write the serialized row
+ * 4. insert that offset into id/age indexes
+ *
+ * That offset becomes the row's "pointer" for later indexed SELECTs.
+ */
 int db_insert(const InsertStmt *stmt, const TableSchema *schema) {
     MKDIR("data");
 
@@ -475,12 +594,17 @@ int db_insert(const InsertStmt *stmt, const TableSchema *schema) {
 
     long offset = ftell(fp);
 
+    /* No explicit column list: values already match schema order. */
     if (stmt->column_count == 0) {
         for (int i = 0; i < stmt->value_count; i++) {
             fprintf(fp, "%s", stmt->values[i]);
             if (i < stmt->value_count - 1) fprintf(fp, " | ");
         }
     } else {
+        /*
+         * Explicit column list: rebuild the stored row in schema order so the
+         * data file layout stays stable regardless of INSERT column order.
+         */
         for (int s = 0; s < schema->column_count; s++) {
             int val_idx = -1;
             for (int c = 0; c < stmt->column_count; c++) {
@@ -507,6 +631,7 @@ int db_insert(const InsertStmt *stmt, const TableSchema *schema) {
     const char *id_val = NULL;
     const char *age_val = NULL;
 
+    /* Resolve id/age from either full-row INSERT or column-list INSERT. */
     if (stmt->column_count == 0) {
         if (id_col >= 0 && id_col < stmt->value_count)
             id_val = stmt->values[id_col];
@@ -523,6 +648,7 @@ int db_insert(const InsertStmt *stmt, const TableSchema *schema) {
         int id = atoi(id_val);
         int age = age_val ? atoi(age_val) : -1;
 
+        /* The table file is the source of truth; indexes are secondary paths. */
         index_insert_id(stmt->table, id, offset);
         if (age >= 0)
             index_insert_age(stmt->table, age, offset);
@@ -531,6 +657,7 @@ int db_insert(const InsertStmt *stmt, const TableSchema *schema) {
     return SQL_OK;
 }
 
+/* Small dispatcher kept for interface compatibility. */
 int executor_run(const ASTNode *node, const TableSchema *schema) {
     if (!node || !schema) return SQL_ERR;
 
@@ -553,6 +680,7 @@ int executor_run(const ASTNode *node, const TableSchema *schema) {
     }
 }
 
+/* Release every heap allocation owned by a ResultSet. */
 void result_free(ResultSet *rs) {
     if (!rs) return;
 

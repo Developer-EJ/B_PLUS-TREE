@@ -6,12 +6,23 @@
 #include "../include/index_manager.h"
 #include "executor/executor_internal.h"
 
+/*
+ * main.c
+ *
+ * CLI entry point for sqlp / sqlp_sim.
+ *
+ * The program reads one SQL file, tokenizes the whole file, splits it into
+ * statements, and executes them one by one. For SELECT statements it can run
+ * in normal mode, forced-linear mode, or compare mode.
+ */
+
 typedef enum {
     RUN_MODE_AUTO = 0,
     RUN_MODE_FORCE_LINEAR = 1,
     RUN_MODE_COMPARE = 2
 } RunMode;
 
+/* Render a ResultSet in a compact SQL-client style table. */
 static void print_pretty_table(ResultSet *rs) {
     if (!rs || rs->row_count == 0) {
         printf("(0 rows)\n");
@@ -56,6 +67,10 @@ static void print_pretty_table(ResultSet *rs) {
 #undef PRINT_SEP
 }
 
+/*
+ * The lexer tokenizes the entire SQL file at once.
+ * This helper rebuilds a per-statement token list using ';' as the boundary.
+ */
 static TokenList *split_tokens(const TokenList *all, int start,
                                int *next_start) {
     int end = start;
@@ -96,6 +111,10 @@ static TokenList *split_tokens(const TokenList *all, int start,
     return sub;
 }
 
+/*
+ * Compare mode keeps result tables on stdout and emits only one compact timing
+ * summary line on stderr so it is easy to redirect or diff.
+ */
 static void print_compare_summary(const SelectExecInfo *auto_info,
                                   const SelectExecInfo *linear_info) {
     if (!auto_info || !linear_info) return;
@@ -125,6 +144,16 @@ static void print_compare_summary(const SelectExecInfo *auto_info,
             linear_info->elapsed_ms / auto_info->elapsed_ms);
 }
 
+/*
+ * Execute one SELECT according to the chosen CLI mode.
+ *
+ * RUN_MODE_COMPARE intentionally runs the same query twice:
+ * - auto path selection
+ * - forced linear fallback
+ *
+ * That makes it easy to compare both the result table and timing behavior
+ * using a single command.
+ */
 static int run_select(const SelectStmt *stmt, const TableSchema *schema,
                       RunMode mode) {
     if (mode == RUN_MODE_COMPARE) {
@@ -139,6 +168,7 @@ static int run_select(const SelectStmt *stmt, const TableSchema *schema,
             return SQL_ERR;
         }
 
+        /* Keep the output order fixed so compare mode is predictable. */
         printf("[AUTO RESULT]\n");
         print_pretty_table(auto_rs);
         printf("[LINEAR RESULT]\n");
@@ -159,6 +189,12 @@ static int run_select(const SelectStmt *stmt, const TableSchema *schema,
     return SQL_OK;
 }
 
+/*
+ * Parse, validate, and execute exactly one SQL statement.
+ *
+ * Even though the input file can contain multiple statements, this function
+ * works on one logical statement at a time.
+ */
 static int run_statement(TokenList *tokens, RunMode mode) {
     ASTNode *ast = parser_parse(tokens);
     if (!ast) {
@@ -170,6 +206,7 @@ static int run_statement(TokenList *tokens, RunMode mode) {
                         ? ast->select.table
                         : ast->insert.table;
 
+    /* The schema drives both validation and result formatting. */
     TableSchema *schema = schema_load(table);
     if (!schema) {
         fprintf(stderr, "Error: schema not found for table '%s'\n", table);
@@ -184,6 +221,10 @@ static int run_statement(TokenList *tokens, RunMode mode) {
         return SQL_ERR;
     }
 
+    /*
+     * index_init() is idempotent for a table, so this call is safe even when
+     * multiple statements in the same file touch the same table.
+     */
     if (index_init(table, IDX_ORDER_DEFAULT, IDX_ORDER_DEFAULT) != 0) {
         fprintf(stderr, "Error: index_init failed for table '%s'\n", table);
         schema_free(schema);
@@ -210,6 +251,7 @@ static int run_statement(TokenList *tokens, RunMode mode) {
     return status;
 }
 
+/* Centralized usage text for option parsing errors. */
 static void print_usage(const char *argv0) {
     fprintf(stderr, "Usage: %s [--force-linear | --compare] <sql_file>\n", argv0);
 }
@@ -219,6 +261,12 @@ int main(int argc, char *argv[]) {
     int compare = 0;
     const char *sql_path = NULL;
 
+    /*
+     * Supported forms:
+     *   ./sqlp file.sql
+     *   ./sqlp --force-linear file.sql
+     *   ./sqlp --compare file.sql
+     */
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--force-linear") == 0) {
             force_linear = 1;
@@ -240,6 +288,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    /* The two execution modifiers are intentionally exclusive. */
     RunMode mode = RUN_MODE_AUTO;
     if (compare) mode = RUN_MODE_COMPARE;
     else if (force_linear) mode = RUN_MODE_FORCE_LINEAR;
@@ -250,6 +299,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    /* Tokenize first, then split the file into statements below. */
     TokenList *all_tokens = lexer_tokenize(sql);
     free(sql);
     if (!all_tokens) {
@@ -261,6 +311,7 @@ int main(int argc, char *argv[]) {
     int fail = 0;
     int pos = 0;
 
+    /* Walk the token stream statement-by-statement. */
     while (pos < all_tokens->count) {
         if (all_tokens->tokens[pos].type == TOKEN_EOF) break;
 
@@ -276,12 +327,14 @@ int main(int argc, char *argv[]) {
 
     lexer_free(all_tokens);
 
+    /* Only print a summary when the file contained multiple statements. */
     if (total > 1) {
         printf("\n%d statement(s) executed", total);
         if (fail > 0) printf(", %d failed", fail);
         printf(".\n");
     }
 
+    /* Release every in-memory table index built during execution. */
     index_cleanup();
     return fail > 0 ? 1 : 0;
 }
