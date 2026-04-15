@@ -56,10 +56,16 @@ dkms.conf
 
 # Build targets
 sqlp
+sqlp_sim
+gen_data
+test_bptree
+test_index
 test_input
 test_parser
 test_schema
 test_executor
+test_perf
+test_perf_sim
 
 # Data files (runtime generated)
 data/*.dat
