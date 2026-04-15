@@ -79,6 +79,7 @@ static void print_pretty_table(ResultSet *rs) {
 static TokenList *split_tokens(const TokenList *all, int start,
                                int *next_start) {
     int end = start;
+    /* 현재 위치부터 ';' 또는 EOF가 나올 때까지를 한 statement로 본다. */
     while (end < all->count &&
            all->tokens[end].type != TOKEN_SEMICOLON &&
            all->tokens[end].type != TOKEN_EOF)
@@ -105,6 +106,7 @@ static TokenList *split_tokens(const TokenList *all, int start,
     for (int i = 0; i < token_count; i++)
         sub->tokens[i] = all->tokens[start + i];
 
+    /* parser는 statement 끝에 EOF가 있기를 기대하므로 가짜 EOF를 붙여 준다. */
     sub->tokens[token_count].type = TOKEN_EOF;
     sub->tokens[token_count].value[0] = '\0';
     sub->tokens[token_count].line =
@@ -166,6 +168,7 @@ static int run_select(const SelectStmt *stmt, const TableSchema *schema,
     if (mode == RUN_MODE_COMPARE) {
         SelectExecInfo auto_info = {0};
         SelectExecInfo linear_info = {0};
+        /* 같은 SELECT를 두 번 돌려서 경로 차이만 비교한다. */
         ResultSet *auto_rs = db_select_mode(stmt, schema, 0, 0, &auto_info);
         ResultSet *linear_rs = db_select_mode(stmt, schema, 1, 0, &linear_info);
 
@@ -191,6 +194,7 @@ static int run_select(const SelectStmt *stmt, const TableSchema *schema,
                                    mode == RUN_MODE_FORCE_LINEAR, 1, NULL);
     if (!rs) return SQL_ERR;
 
+    /* 일반 모드와 강제 linear 모드는 결과 테이블 하나만 출력한다. */
     print_pretty_table(rs);
     result_free(rs);
     return SQL_OK;
@@ -241,10 +245,12 @@ static int run_statement(TokenList *tokens, RunMode mode) {
 
     int status = SQL_OK;
     if (ast->type == STMT_SELECT) {
+        /* SELECT는 현재 모드에 맞는 경로 선택까지 포함해서 실행한다. */
         status = run_select(&ast->select, schema, mode);
         if (status != SQL_OK)
             fprintf(stderr, "Error: select failed\n");
     } else {
+        /* INSERT는 executor가 파일 append + 인덱스 갱신까지 맡는다. */
         status = db_insert(&ast->insert, schema);
         if (status != SQL_OK) {
             fprintf(stderr, "Error: insert failed\n");
@@ -326,9 +332,11 @@ int main(int argc, char *argv[]) {
         TokenList *sub = split_tokens(all_tokens, pos, &next);
         if (sub) {
             total++;
+            /* statement 하나라도 실패하면 전체 종료 코드는 실패가 되도록 fail을 센다. */
             if (run_statement(sub, mode) != SQL_OK) fail++;
             lexer_free(sub);
         }
+        /* 다음 statement의 시작 위치로 이동한다. */
         pos = next;
     }
 

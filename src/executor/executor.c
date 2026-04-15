@@ -90,6 +90,7 @@ static int line_column_value(const char *line, int col_idx,
     strncpy(tmp, line, sizeof(tmp) - 1);
     tmp[sizeof(tmp) - 1] = '\0';
 
+    /* strtok로 자르기 때문에 원본 line을 훼손하지 않도록 임시 버퍼를 쓴다. */
     char *tok = strtok(tmp, "|");
     for (int i = 0; i < col_idx && tok; i++)
         tok = strtok(NULL, "|");
@@ -176,6 +177,7 @@ static int line_matches_filter(const char *line, const SelectStmt *stmt,
     if (stmt->where.type == WHERE_BETWEEN) {
         int col_idx = find_column_index(schema, stmt->where.col);
         if (col_idx < 0) return 1;
+        /* BETWEEN은 현재 정수형 컬럼에 대해서만 선형 비교를 지원한다. */
         if (schema->columns[col_idx].type != COL_INT) return 0;
 
         char value[256];
@@ -241,6 +243,7 @@ static int read_rows(FILE *fp, const SelectStmt *stmt,
             line[--len] = '\0';
         if (len == 0) continue;
 
+        /* WHERE 조건에 안 맞는 줄은 바로 건너뛴다. */
         if (!line_matches_filter(line, stmt, schema)) continue;
 
         if (row_count == capacity) {
@@ -250,6 +253,7 @@ static int read_rows(FILE *fp, const SelectStmt *stmt,
             rows = tmp;
         }
 
+        /* 조건을 만족한 줄만 실제 Row 구조체로 파싱한다. */
         rows[row_count] = parse_line_to_row(line, schema);
         if (!rows[row_count].values) break;
         row_count++;
@@ -335,9 +339,11 @@ static ResultSet *build_resultset(Row *rows, int row_count,
         rs->rows[r].values = (char **)calloc((size_t)rs->col_count, sizeof(char *));
         for (int c = 0; c < rs->col_count; c++) {
             int si = idx[c];
+            /* projection 대상 컬럼만 골라 새 ResultSet row에 복사한다. */
             rs->rows[r].values[c] = dup_string(
                 (si >= 0 && si < rows[r].count) ? rows[r].values[si] : "");
         }
+        /* 원본 Row 배열은 ResultSet으로 옮긴 뒤 즉시 정리한다. */
         for (int j = 0; j < rows[r].count; j++)
             free(rows[r].values[j]);
         free(rows[r].values);
@@ -372,6 +378,7 @@ static ResultSet *fetch_by_offset(long offset, const SelectStmt *stmt,
         return make_empty_rs(schema);
     }
 
+    /* offset 위치에서 정확히 한 줄만 읽어 point 조회 결과를 만든다. */
     char line[1024];
     if (!fgets(line, sizeof(line), fp)) {
         fclose(fp);
@@ -425,6 +432,7 @@ static ResultSet *fetch_by_offsets(const long *offsets, int count,
 
     int actual = 0;
     for (int i = 0; i < count; i++) {
+        /* offset마다 파일 위치를 다시 옮겨 해당 row를 읽는다. */
         if (fseek(fp, offsets[i], SEEK_SET) != 0) continue;
 
         char line[1024];
@@ -435,6 +443,7 @@ static ResultSet *fetch_by_offsets(const long *offsets, int count,
             line[--len] = '\0';
         if (len == 0) continue;
 
+        /* 읽기에 성공한 row만 실제 결과 배열에 채워 넣는다. */
         rows[actual] = parse_line_to_row(line, schema);
         if (rows[actual].values) actual++;
     }
@@ -502,11 +511,13 @@ ResultSet *db_select_mode(const SelectStmt *stmt, const TableSchema *schema,
     if (!force_linear && stmt->has_where && strcmp(stmt->where.col, "id") == 0) {
         if (stmt->where.type == WHERE_EQ) {
             scan_type = "index:id:eq";
+            /* 이전 조회의 tree_io가 섞이지 않도록 매 실행 전에 초기화한다. */
             index_reset_io_stats(stmt->table);
 
             int id = atoi(stmt->where.val);
             long offset = index_search_id(stmt->table, id);
             tree_io = index_last_io_id(stmt->table);
+            /* point 조회는 offset 하나만 받아 한 줄만 읽는다. */
             rs = fetch_by_offset(offset, stmt, schema);
         } else if (stmt->where.type == WHERE_BETWEEN) {
             scan_type = "index:id:range";
@@ -517,6 +528,7 @@ ResultSet *db_select_mode(const SelectStmt *stmt, const TableSchema *schema,
             int count = 0;
             long *offsets = index_range_id_alloc(stmt->table, from, to, &count);
             tree_io = index_last_io_id(stmt->table);
+            /* range 조회는 offset 배열을 받아 여러 row를 다시 읽는다. */
             rs = fetch_by_offsets(offsets, count, stmt, schema);
             free(offsets);
         }
@@ -532,6 +544,7 @@ ResultSet *db_select_mode(const SelectStmt *stmt, const TableSchema *schema,
         int count = 0;
         long *offsets = index_range_age_alloc(stmt->table, from, to, &count);
         tree_io = index_last_io_age(stmt->table);
+        /* age range도 결국 offset 배열 -> 실제 row 재조회 흐름은 동일하다. */
         rs = fetch_by_offsets(offsets, count, stmt, schema);
         free(offsets);
     }
@@ -547,6 +560,7 @@ ResultSet *db_select_mode(const SelectStmt *stmt, const TableSchema *schema,
     if (!rs) {
         scan_type = "linear";
         tree_io = 0;
+        /* 인덱스로 처리하지 못한 모든 경우는 여기서 파일 전체 스캔으로 처리한다. */
         rs = linear_scan(stmt, schema);
     }
 
@@ -621,6 +635,7 @@ int db_insert(const InsertStmt *stmt, const TableSchema *schema) {
                     break;
                 }
             }
+            /* 명시되지 않은 컬럼은 빈 문자열로 채워 파일 형식을 유지한다. */
             fprintf(fp, "%s", val_idx >= 0 ? stmt->values[val_idx] : "");
             if (s < schema->column_count - 1) fprintf(fp, " | ");
         }
@@ -658,6 +673,7 @@ int db_insert(const InsertStmt *stmt, const TableSchema *schema) {
 
         /* 실제 원본은 테이블 파일이고, 인덱스는 그 파일을 빠르게 찾기 위한 보조 경로다. */
         index_insert_id(stmt->table, id, offset);
+        /* age 값이 있는 경우에만 age 보조 인덱스도 같이 갱신한다. */
         if (age >= 0)
             index_insert_age(stmt->table, age, offset);
     }

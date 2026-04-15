@@ -87,6 +87,10 @@ static int sim_ensure_file(void) {
     unsigned char page[IO_PAGE_SIZE];
     memset(page, 0xA5, sizeof(page));
 
+    /*
+     * 같은 내용을 가진 페이지를 여러 개 미리 써 둔다.
+     * 이후에는 이 파일 안에서 페이지 위치만 바꿔 가며 read 한다.
+     */
     for (int i = 0; i < IO_SIM_PAGES; i++) {
         if (fwrite(page, 1, sizeof(page), g_sim_file) != sizeof(page)) {
             fclose(g_sim_file);
@@ -107,10 +111,12 @@ static void sim_page_read(void) {
 
     if (!sim_ensure_file()) return;
 
+    /* 현재 가리키는 가상 페이지 위치로 이동해서 한 페이지를 읽는다. */
     if (fseek(g_sim_file, g_sim_page_cursor * IO_PAGE_SIZE, SEEK_SET) != 0)
         rewind(g_sim_file);
 
     (void)fread(page, 1, sizeof(page), g_sim_file);
+    /* 다음 방문은 다른 페이지를 읽었다고 가정하기 위해 커서를 순환시킨다. */
     g_sim_page_cursor = (g_sim_page_cursor + 1) % IO_SIM_PAGES;
 #endif
 }
@@ -164,6 +170,7 @@ static int valuelist_insert_sorted(BPValueList *list, long offset) {
         list->capacity = new_capacity;
     }
 
+    /* insert_at 뒤 원소들을 한 칸씩 밀어 자리를 만든다. */
     for (int i = list->count; i > insert_at; i--)
         list->offsets[i] = list->offsets[i - 1];
 
@@ -281,6 +288,7 @@ static void split_leaf_into_right(BPNode *leaf,
     int old_count = leaf->key_count;
     int split_at = old_count / 2;
 
+    /* split 지점 오른쪽 절반을 새 leaf로 옮긴다. */
     for (int i = split_at; i < old_count; i++) {
         int right_idx = right->key_count;
         right->keys[right_idx] = leaf->keys[i];
@@ -291,11 +299,16 @@ static void split_leaf_into_right(BPNode *leaf,
 
     leaf->key_count = split_at;
 
+    /*
+     * range scan이 leaf 연결 리스트를 따라가기 때문에
+     * split 뒤에도 next/prev 링크를 반드시 유지해야 한다.
+     */
     right->next = leaf->next;
     if (right->next) right->next->prev = right;
     right->prev = leaf;
     leaf->next = right;
 
+    /* 부모에는 "오른쪽 leaf의 첫 key"가 separator로 올라간다. */
     result->did_split = 1;
     result->promoted_key = right->keys[0];
     result->right = right;
@@ -311,10 +324,12 @@ static void split_internal_into_right(BPNode *node,
     int right_key_idx = 0;
     int right_child_idx = 0;
 
+    /* 가운데 key는 부모로 승격되므로, 오른쪽 노드에는 split_at+1부터 복사한다. */
     for (int i = split_at + 1; i < old_count; i++)
         right->keys[right_key_idx++] = node->keys[i];
     right->key_count = right_key_idx;
 
+    /* 오른쪽 노드는 승격된 key의 오른쪽 자식들만 넘겨받는다. */
     for (int i = split_at + 1; i <= old_count; i++) {
         right->children[right_child_idx++] = node->children[i];
         node->children[i] = NULL;
@@ -397,9 +412,11 @@ static int rollback_insert(BPNode *node, int key, long offset) {
         if (valuelist_remove_one(list, offset) != 0)
             return -1;
 
+        /* 같은 key에 offset이 아직 남아 있으면 key 엔트리는 유지한다. */
         if (list->count > 0)
             return 0;
 
+        /* 마지막 offset까지 빠졌다면 key 자체를 leaf에서 제거한다. */
         valuelist_destroy(list);
         for (int i = pos; i + 1 < node->key_count; i++) {
             node->keys[i] = node->keys[i + 1];
@@ -429,12 +446,17 @@ static int bpnode_insert(BPTree *tree, BPNode *node,
         int pos = leaf_lower_bound(node, key);
         BPNode *right = NULL;
 
+        /* 같은 key가 이미 있으면 새 leaf entry를 만들지 않고 offset만 추가한다. */
         if (pos < node->key_count && node->keys[pos] == key)
             return valuelist_insert_sorted(node->values[pos], offset);
 
         BPValueList *list = valuelist_create(offset);
         if (!list) return -1;
 
+        /*
+         * 현재 leaf가 가득 찼다면 미리 오른쪽 노드를 준비해 둔다.
+         * 실제 split은 삽입 후 한 번에 수행한다.
+         */
         if (node->key_count == max_keys(tree)) {
             right = bpnode_create(tree->order, 1);
             if (!right) {
@@ -443,6 +465,7 @@ static int bpnode_insert(BPTree *tree, BPNode *node,
             }
         }
 
+        /* 삽입 위치 뒤의 key/value를 한 칸 밀어 새 key 자리를 만든다. */
         for (int i = node->key_count; i > pos; i--) {
             node->keys[i] = node->keys[i - 1];
             node->values[i] = node->values[i - 1];
@@ -455,6 +478,7 @@ static int bpnode_insert(BPTree *tree, BPNode *node,
         if (!right)
             return 0;
 
+        /* overflow였다면 여기서 leaf를 실제로 둘로 나눈다. */
         split_leaf_into_right(node, right, result);
         return 0;
     }
@@ -467,9 +491,11 @@ static int bpnode_insert(BPTree *tree, BPNode *node,
                       key, offset, &child_result) != 0)
         return -1;
 
+    /* 자식이 split되지 않았다면 부모는 아무것도 할 일이 없다. */
     if (!child_result.did_split)
         return 0;
 
+    /* 자식 split 결과를 꽂기 전에, 부모 자신도 overflow인지 확인한다. */
     if (node->key_count == max_keys(tree)) {
         right = bpnode_create(tree->order, 0);
         if (!right) {
@@ -479,9 +505,11 @@ static int bpnode_insert(BPTree *tree, BPNode *node,
         }
     }
 
+    /* 승격된 separator key가 들어갈 자리를 만들기 위해 오른쪽으로 민다. */
     for (int i = node->key_count; i > child_idx; i--)
         node->keys[i] = node->keys[i - 1];
 
+    /* children 배열은 key보다 하나 더 많으므로 +1 위치까지 함께 밀어야 한다. */
     for (int i = node->key_count + 1; i > child_idx + 1; i--)
         node->children[i] = node->children[i - 1];
 
@@ -521,6 +549,7 @@ static BPNode *find_leaf(BPTree *tree, int key) {
         record_node_visit(tree);
         if (node->is_leaf)
             return node;
+        /* 현재 internal node의 separator를 기준으로 다음 child를 고른다. */
         node = node->children[internal_child_index(node, key)];
     }
 
@@ -625,10 +654,12 @@ long bptree_search(BPTree *tree, int key) {
     leaf = find_leaf(tree, key);
     if (!leaf) return -1;
 
+    /* leaf 안에서는 lower_bound 결과가 실제 key와 같은지 다시 확인해야 한다. */
     pos = leaf_lower_bound(leaf, key);
     if (pos >= leaf->key_count || leaf->keys[pos] != key)
         return -1;
 
+    /* point search는 같은 key의 첫 번째 offset 하나만 반환한다. */
     return leaf->values[pos]->offsets[0];
 }
 
@@ -652,9 +683,11 @@ long *bptree_range_alloc(BPTree *tree, int from, int to, int *out_count) {
     leaf = find_leaf(tree, from);
     if (!leaf) return NULL;
 
+    /* 첫 leaf에 도착한 뒤에는 from 이상이 시작되는 위치부터 보면 된다. */
     pos = leaf_lower_bound(leaf, from);
 
     while (leaf) {
+        /* 첫 leaf 이후로 옆 leaf를 넘길 때도 노드 방문 1회로 기록한다. */
         if (!first_leaf)
             record_node_visit(tree);
 
@@ -662,6 +695,7 @@ long *bptree_range_alloc(BPTree *tree, int from, int to, int *out_count) {
             int key = leaf->keys[pos];
             BPValueList *list = leaf->values[pos];
 
+            /* leaf가 정렬되어 있으므로 to를 넘는 순간 전체 탐색을 끝낼 수 있다. */
             if (key > to) {
                 *out_count = buffer.count;
                 if (buffer.count == 0) {
@@ -672,6 +706,7 @@ long *bptree_range_alloc(BPTree *tree, int from, int to, int *out_count) {
             }
 
             if (key >= from) {
+                /* 같은 key에 매달린 offset들을 모두 결과 버퍼에 펼쳐 넣는다. */
                 for (int i = 0; i < list->count; i++) {
                     if (range_buffer_push(&buffer, list->offsets[i]) != 0) {
                         free(buffer.offsets);
@@ -683,6 +718,7 @@ long *bptree_range_alloc(BPTree *tree, int from, int to, int *out_count) {
             pos++;
         }
 
+        /* 현재 leaf를 다 봤으면 오른쪽 leaf로 이동해서 계속 이어서 본다. */
         leaf = leaf->next;
         pos = 0;
         first_leaf = 0;

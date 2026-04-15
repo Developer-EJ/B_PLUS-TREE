@@ -238,6 +238,7 @@ static int raw_scan_count(const char *table, const SelectStmt *stmt,
     int rows = 0;
     char line[1024];
     while (fgets(line, sizeof(line), fp)) {
+        /* Raw linear 비교에서는 조건 만족 row 수만 세고 더 무거운 작업은 하지 않는다. */
         if (raw_line_matches(line, stmt, schema))
             rows++;
     }
@@ -274,6 +275,7 @@ static int measure_raw_id_point(const char *table, int target_id,
     long offset = -1;
 
     for (int i = 0; i < BENCH_RUNS; i++) {
+        /* 이전 실행의 tree_io 흔적이 남지 않도록 매번 초기화한다. */
         index_reset_io_stats(table);
         double t0 = now_ms();
         offset = index_search_id(table, target_id);
@@ -299,6 +301,7 @@ static int measure_raw_id_range(const char *table, int from, int to,
         int count = 0;
         long *offsets = index_range_id_alloc(table, from, to, &count);
         total += now_ms() - t0;
+        /* raw 층위에서는 실제 row를 읽지 않고 offset 개수만 결과 row 수로 본다. */
         rows = count;
         free(offsets);
     }
@@ -322,6 +325,7 @@ static int measure_raw_age_range(const char *table, int from, int to,
         int count = 0;
         long *offsets = index_range_age_alloc(table, from, to, &count);
         total += now_ms() - t0;
+        /* age range도 raw 비교에서는 offset 수만 센다. */
         rows = count;
         free(offsets);
     }
@@ -357,8 +361,10 @@ static int measure_executor_select(const SelectStmt *stmt,
         double elapsed = now_ms() - t0;
         if (!rs) return SQL_ERR;
 
+        /* executor 층위에서는 사용자가 실제로 보게 되는 row_count를 그대로 쓴다. */
         rows = rs->row_count;
         total += elapsed;
+        /* 마지막 실행에서 기록된 경로 / tree_io를 리포트용으로 보관한다. */
         info = current;
         result_free(rs);
     }
@@ -381,6 +387,7 @@ static int bench_point_search(const char *table, const TableSchema *schema,
     BenchResult exec_linear;
 
     snprintf(id_buf, sizeof(id_buf), "%d", target_id);
+    /* 벤치용 SELECT AST를 직접 구성해서 parser 비용은 제외한다. */
     init_select_eq(&stmt, table, "id", id_buf);
     if (validate_select_stmt(&stmt, schema) != SQL_OK) return SQL_ERR;
 
@@ -416,6 +423,7 @@ static int bench_id_range_search(const char *table, const TableSchema *schema,
 
     snprintf(from_buf, sizeof(from_buf), "%d", from);
     snprintf(to_buf, sizeof(to_buf), "%d", to);
+    /* 같은 논리 쿼리를 Raw / Executor 양쪽에 동일하게 넣기 위해 AST를 직접 만든다. */
     init_select_between(&stmt, table, "id", from_buf, to_buf);
     if (validate_select_stmt(&stmt, schema) != SQL_OK) return SQL_ERR;
 
@@ -452,6 +460,7 @@ static int bench_age_range_search(const char *table, const TableSchema *schema,
 
     snprintf(from_buf, sizeof(from_buf), "%d", from);
     snprintf(to_buf, sizeof(to_buf), "%d", to);
+    /* age 범위 조회는 보조 인덱스의 장단점이 드러나는 대표 케이스다. */
     init_select_between(&stmt, table, "age", from_buf, to_buf);
     if (validate_select_stmt(&stmt, schema) != SQL_OK) return SQL_ERR;
 
@@ -478,6 +487,7 @@ static int bench_age_range_search(const char *table, const TableSchema *schema,
 /* 높이 비교 테스트를 위해 두 트리를 같은 order로 다시 만든다. */
 static int init_index_for_order(const char *table, int order) {
     index_cleanup();
+    /* id/age 트리 모두 같은 order로 다시 만들어 높이 차이만 비교한다. */
     return index_init(table, order, order);
 }
 
@@ -506,6 +516,7 @@ static int bench_height_comparison(const char *table, const TableSchema *schema,
         measure_executor_select(&stmt, schema, 0, TREE_ID, &exec_small) != SQL_OK)
         return SQL_ERR;
 
+    /* 같은 데이터로 order만 바꿔 다시 만들고 동일한 point query를 한 번 더 잰다. */
     if (init_index_for_order(table, IDX_ORDER_DEFAULT) != 0) return SQL_ERR;
     if (measure_raw_id_point(table, target_id, &raw_default) != SQL_OK ||
         measure_executor_select(&stmt, schema, 0, TREE_ID, &exec_default) != SQL_OK)
@@ -567,6 +578,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    /* 초기 높이를 먼저 보여 주면 뒤의 benchmark 결과를 해석하기 쉬워진다. */
     printf("  tree_h(id)=%d  tree_h(age)=%d\n",
            index_height_id(table), index_height_age(table));
 
