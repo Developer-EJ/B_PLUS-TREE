@@ -77,7 +77,7 @@ int index_init(const char *table, int order_id, int order_age) {
     // text 모드는 OS가 파일을 읽으면서 개행문자를 자동으로 변환하기 때문에 BYTE 수가 달라진다.
     FILE *fp = fopen(path, "rb");
     if (!fp) {
-        fprintf(stderr, "[index] '%s' initialized (file missing, empty index)\n",
+        fprintf(stderr, "[index] '%s' \uCD08\uAE30\uD654 \uC644\uB8CC (\uD30C\uC77C \uC5C6\uC74C, \uBE48 \uC778\uB371\uC2A4)\n",
                 table);
         ti->initialized = 1;
         return 0;
@@ -119,7 +119,7 @@ int index_init(const char *table, int order_id, int order_age) {
     fclose(fp);
 
     fprintf(stderr,
-            "[index] '%s' initialized - %d rows loaded "
+            "[index] '%s' \uCD08\uAE30\uD654 \uC644\uB8CC - %d\uD589 \uB85C\uB4DC "
             "(order_id=%d, order_age=%d)\n",
             table, inserted, oid, oage);
 
